@@ -8,7 +8,7 @@ Human checks (not automated): eyeballing overfit samples (phase 8) and ComfyUI l
 - [x] **1 — Golden harness for SD1.5.** `scripts/make_goldens.py` writes `tests/goldens/sd15/*.npz`; smoke test loads each npz and asserts shapes/dtypes. Captured `stable-diffusion-v1-5/stable-diffusion-v1-5` on CPU in fp32. Caption: "a photograph of an astronaut riding a horse"; the second prompt is empty.
 - [x] **2 — Weight conversion.** Registry, mappers, and `load_model`. Zero unmapped keys, post-transpose shapes match, unknown `_class_name` raises. SD1.5 unet, vae, and text_encoder from the local cache each have 0 unmapped keys. Module classes are not registered yet.
 - [x] **3 — Core modules fp32.** Timesteps, TimestepEmbedding, Resnet, self/cross Attention, FeedForward, Transformer2D, up/downsample, and the first down block pass the module gate (mean abs < 1e-5 and max abs < 5e-4) on the timestep-999 hooks.
-- [ ] **4 — CLIP text encoder.** SD1.5 ViT-L/14 `last_hidden_state` matches golden for both prompts.
+- [x] **4 — CLIP text encoder.** SD1.5 ViT-L/14 `last_hidden_state` matches the embedding gate (mean abs < 1e-5 and max abs < 1e-3) for both prompts and the batch.
 - [ ] **5 — AutoencoderKL.** Decode image and encode posterior mean match gates.
 - [ ] **6 — SD1.5 UNet.** Single-step noise pred at timesteps 999, 500, and 1 within full-UNet gates. No sampling.
 - [ ] **7 — Schedulers + SD1.5 pipeline.** 20-step DDIM within the end-to-end gate; reference and MLX PNGs committed side by side.

@@ -45,6 +45,15 @@ class ArchEntry:
 ARCH_REGISTRY: dict[str, ArchEntry] = {name: ArchEntry(name) for name in ARCH_REGISTRY_KEYS}
 
 
+def _register_builtin_modules() -> None:
+    from mlx_diffusers.models.clip_text_model import CLIPTextModel
+
+    ARCH_REGISTRY["CLIPTextModel"].cls = CLIPTextModel
+
+
+_register_builtin_modules()
+
+
 @dataclass
 class LoadResult:
     class_name: str
@@ -54,6 +63,7 @@ class LoadResult:
     whitelisted: tuple[str, ...]
     module_registered: bool
     message: str
+    module: Any = None
 
 
 def class_name_from_config(config: dict[str, Any]) -> str:
@@ -77,8 +87,9 @@ def resolve_class_name(class_name: str) -> str:
 def load_model(component_dir: str | Path) -> LoadResult:
     """Map a local diffusers component directory to MLX weights.
 
-    The module class is not invented here. When ``ARCH_REGISTRY`` has no ``cls``,
-    the converted weights are returned and the module is reported as not registered.
+    When ``ARCH_REGISTRY`` has a ``cls``, that class is constructed from the
+    component config and the converted weights are assigned. Otherwise the
+    weights are returned and the module is reported as not registered.
     """
     from mlx_diffusers.utils.convert import CONVERTERS
     from mlx_diffusers.utils.loading import read_safetensors
@@ -102,6 +113,10 @@ def load_model(component_dir: str | Path) -> LoadResult:
 
     entry = ARCH_REGISTRY[class_name]
     registered = entry.cls is not None
+    module = None
+    if registered:
+        module = entry.cls(config)
+        module.load_converted(weights)
     return LoadResult(
         class_name=class_name,
         config=config,
@@ -110,6 +125,7 @@ def load_model(component_dir: str | Path) -> LoadResult:
         whitelisted=tuple(converted.whitelisted),
         module_registered=registered,
         message="module is registered" if registered else "module is not registered",
+        module=module,
     )
 
 

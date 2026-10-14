@@ -53,8 +53,9 @@ def test_unknown_class_name_on_load(tmp_path: Path):
 def test_alias_is_not_a_second_registry():
     assert set(CLASS_NAME_ALIASES.values()) <= set(ARCH_REGISTRY)
     assert set(CONVERTERS) == set(ARCH_REGISTRY)
-    for entry in ARCH_REGISTRY.values():
-        assert entry.cls is None
+    assert ARCH_REGISTRY["CLIPTextModel"].cls is not None
+    assert ARCH_REGISTRY["UNet2DConditionModel"].cls is None
+    assert ARCH_REGISTRY["AutoencoderKL"].cls is None
 
 
 def test_known_class_returns_weights_without_a_module(tmp_path: Path):
@@ -140,7 +141,7 @@ def test_sd15_components_have_no_unmapped_keys_and_transposed_shapes():
         result = load_model(snapshot / name)
         assert result.class_name == spec["class_name"]
         assert result.unmapped == ()
-        assert result.module_registered is False
+        assert result.module_registered is (name == "text_encoder")
         assert set(result.weights) == set(original)
         linear = result.weights[spec["linear"]]
         mx.eval(linear)
