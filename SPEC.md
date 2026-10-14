@@ -15,9 +15,9 @@ Pure-MLX library for diffusion models on Apple Silicon. End state: train an Anim
 
 ## Environment
 
-- macOS, Apple Silicon, Python 3.11.
+- macOS, Apple Silicon, Python 3.11 (`.python-version`).
+- uv is the only install path. `uv sync` installs the project, runtime dependencies, and the default `dev` group (`pytest`). Run tests with `uv run pytest`. `torch`, `diffusers`, `transformers`, and `huggingface_hub` are the `reference` dependency group, locked in `uv.lock`, and installed with `uv sync --group reference`.
 - Runtime: `mlx`, `numpy`, `safetensors`, `pillow`, `tqdm`.
-- Dev/reference (optional `reference` extra; not installed in Phase 0): `torch`, `diffusers`, `transformers`, `huggingface_hub`, `pytest`.
 - Maintain `PROGRESS.md` as a phase checklist. Update it at every phase completion.
 
 ## Golden-tensor protocol
@@ -60,7 +60,7 @@ Implement one phase at a time. A phase is DONE only when every acceptance criter
 
 ### 0 — Scaffold + environment
 
-DONE when `pip install -e .` and `pytest` pass on Apple Silicon, MLX eval works, and `PROGRESS.md` exists.
+DONE when `uv sync` and `uv run pytest` pass on Apple Silicon, MLX eval works, and `PROGRESS.md` exists.
 
 ### 1 — Golden harness for SD1.5
 

@@ -4,21 +4,24 @@ Pure-MLX diffusion models for Apple Silicon. Ports are validated numerically aga
 
 ## Setup
 
-Requires macOS on Apple Silicon and Python 3.11.
+Requires macOS on Apple Silicon, Python 3.11, and [uv](https://docs.astral.sh/uv/).
 
 ```bash
 cd ~/code/mlx-diffusers
-python3.11 -m venv .venv
-source .venv/bin/activate
-python -m pip install -U pip
-pip install -e .
-pytest
+uv sync
+uv run pytest
 ```
 
-`pip install -e .` installs runtime dependencies and pytest. It does not install the optional `reference` extra (`torch`, `diffusers`, `transformers`, `huggingface_hub`).
+`uv sync` creates `.venv` from `.python-version`, installs this project, and installs the runtime dependencies plus pytest (the default `dev` group). It does not install the `reference` group.
+
+Sync the locked reference packages (`torch`, `diffusers`, `transformers`, `huggingface_hub`) when a phase needs the PyTorch reference:
+
+```bash
+uv sync --group reference
+```
 
 Confirm MLX evaluates:
 
 ```bash
-python -c "import mlx.core as mx; mx.eval(mx.array([1.0]))"
+uv run python -c "import mlx.core as mx; mx.eval(mx.array([1.0]))"
 ```
