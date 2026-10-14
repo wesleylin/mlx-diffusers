@@ -31,6 +31,9 @@ def read_safetensors(directory: str | Path) -> dict[str, np.ndarray]:
     if len(indexes) == 1:
         return _read_sharded(directory, indexes[0])
     files = sorted(directory.glob("*.safetensors"))
+    fp32 = [path for path in files if ".fp16." not in path.name]
+    if len(fp32) == 1:
+        files = fp32
     if len(files) != 1:
         raise FileNotFoundError(f"expected one safetensors file in {directory}, found {len(files)}")
     return _read_file(files[0])

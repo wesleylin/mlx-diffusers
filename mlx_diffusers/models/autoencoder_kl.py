@@ -21,6 +21,22 @@ from mlx_diffusers.layers.updownsampling import Downsample2D, Upsample2D
 # diffusers Encoder/Decoder hardcode this GroupNorm eps.
 VAE_NORM_EPS = 1e-6
 
+# Current diffusers ``Attention`` names. Older VAE checkpoints still use
+# ``query`` / ``key`` / ``value`` / ``proj_attn``. The forward is the same.
+_VAE_ATTENTION_RENAMES = (
+    (".to_q.", ".query."),
+    (".to_k.", ".key."),
+    (".to_v.", ".value."),
+    (".to_out.0.", ".proj_attn."),
+)
+
+
+def _vae_attention_key(key: str) -> str:
+    for source, dest in _VAE_ATTENTION_RENAMES:
+        if source in key:
+            return key.replace(source, dest, 1)
+    return key
+
 
 def _split_heads(x: mx.array, heads: int) -> mx.array:
     batch, seq, channels = x.shape
@@ -265,7 +281,7 @@ class AutoencoderKL(nn.Module):
         self.post_quant_conv = Conv2d(latent, latent, kernel_size=1)
 
     def load_converted(self, weights: dict[str, mx.array]) -> None:
-        pairs = [(key, phase2_to_parameter(key, value)) for key, value in weights.items()]
+        pairs = [( _vae_attention_key(key), phase2_to_parameter(key, value)) for key, value in weights.items()]
         self.load_weights(pairs, strict=True)
         self.eval()
 

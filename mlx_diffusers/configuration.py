@@ -18,6 +18,7 @@ ARCH_REGISTRY_KEYS = (
     "UNet2DConditionModel",
     "AutoencoderKL",
     "CLIPTextModel",
+    "CLIPTextModelWithProjection",
 )
 
 # Not a second registry. Values are keys of ARCH_REGISTRY.
@@ -48,9 +49,11 @@ ARCH_REGISTRY: dict[str, ArchEntry] = {name: ArchEntry(name) for name in ARCH_RE
 def _register_builtin_modules() -> None:
     from mlx_diffusers.models.autoencoder_kl import AutoencoderKL
     from mlx_diffusers.models.clip_text_model import CLIPTextModel
+    from mlx_diffusers.models.clip_text_model_with_projection import CLIPTextModelWithProjection
     from mlx_diffusers.models.unet_2d_condition import UNet2DConditionModel
 
     ARCH_REGISTRY["CLIPTextModel"].cls = CLIPTextModel
+    ARCH_REGISTRY["CLIPTextModelWithProjection"].cls = CLIPTextModelWithProjection
     ARCH_REGISTRY["AutoencoderKL"].cls = AutoencoderKL
     ARCH_REGISTRY["UNet2DConditionModel"].cls = UNet2DConditionModel
 
@@ -119,7 +122,12 @@ def load_model(component_dir: str | Path) -> LoadResult:
     registered = entry.cls is not None
     module = None
     if registered:
-        module = entry.cls(config)
+        module_cls = entry.cls
+        if class_name == "UNet2DConditionModel" and config.get("use_linear_projection"):
+            from mlx_diffusers.models.unet_sdxl import UNet2DConditionXL
+
+            module_cls = UNet2DConditionXL
+        module = module_cls(config)
         module.load_converted(weights)
     return LoadResult(
         class_name=class_name,

@@ -159,13 +159,31 @@ class CLIPTextModel(nn.Module):
     def load_converted(self, weights: dict[str, mx.array]) -> None:
         """Assign Phase 2 weights. Embeddings stay ``[vocab, dim]``; linears are transposed."""
         pairs = []
+        seen_position_ids = False
         for key, value in weights.items():
             if key in _EMBEDDING_WEIGHTS or key.endswith("position_ids"):
                 pairs.append((key, value))
+                seen_position_ids = seen_position_ids or key.endswith("position_ids")
             else:
                 pairs.append((key, phase2_to_parameter(key, value)))
+        if not seen_position_ids:
+            # Newer CLIP checkpoints omit this non-persistent buffer. The module
+            # already holds arange(max_position_embeddings).
+            pairs.append(("text_model.embeddings.position_ids", self.text_model.embeddings.position_ids))
         self.load_weights(pairs, strict=True)
         self.eval()
 
     def __call__(self, input_ids: mx.array) -> mx.array:
         return self.text_model(input_ids)
+
+    def penultimate(self, input_ids: mx.array) -> mx.array:
+        """``hidden_states[-2]`` from the installed transformers CLIP text model.
+
+        Hooks record each encoder layer and do not append the final layer norm
+        (``tie_last_hidden_states`` is false). Index ``-1`` is the last encoder
+        layer and ``-2`` is the layer before it.
+        """
+        hidden = self.text_model.embeddings(input_ids)
+        for layer in self.text_model.encoder.layers[:-1]:
+            hidden = layer(hidden)
+        return hidden

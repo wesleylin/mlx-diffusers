@@ -36,6 +36,7 @@ def read_model_index(model_dir: str | Path) -> dict:
 def from_pretrained(model_id_or_path: str | Path):
     """Build the pipeline named in ``model_index.json``."""
     import mlx_diffusers.pipelines.pipeline_stable_diffusion  # noqa: F401
+    import mlx_diffusers.pipelines.pipeline_stable_diffusion_xl  # noqa: F401
 
     model_dir = resolve_pretrained(model_id_or_path)
     index = read_model_index(model_dir)

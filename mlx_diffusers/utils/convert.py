@@ -138,4 +138,5 @@ CONVERTERS: dict[str, Mapper] = {
     "UNet2DConditionModel": map_unet,
     "AutoencoderKL": map_autoencoder_kl,
     "CLIPTextModel": map_clip_text,
+    "CLIPTextModelWithProjection": map_clip_text,
 }

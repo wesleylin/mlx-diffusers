@@ -45,6 +45,8 @@ def main() -> None:
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--steps", type=int, default=20)
     parser.add_argument("--guidance-scale", type=float, default=7.5)
+    parser.add_argument("--height", type=int, default=None)
+    parser.add_argument("--width", type=int, default=None)
     parser.add_argument("--scheduler", choices=("ddim", "euler"), default="ddim")
     parser.add_argument(
         "--model",
@@ -56,13 +58,16 @@ def main() -> None:
     pipeline = from_pretrained(args.model)
     if args.scheduler == "euler":
         pipeline.scheduler = EulerDiscreteScheduler.from_config(pipeline.scheduler_config)
-    image = pipeline(
-        args.prompt,
+    call = dict(
         num_inference_steps=args.steps,
         guidance_scale=args.guidance_scale,
         seed=args.seed,
         eta=0.0,
     )
+    if args.height is not None:
+        call["height"] = args.height
+        call["width"] = args.width if args.width is not None else args.height
+    image = pipeline(args.prompt, **call)
     mx.eval(image)
     save_image(image, args.output)
     float_path = args.output.with_suffix(".npy")
