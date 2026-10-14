@@ -15,6 +15,7 @@ dependencies = [
     "safetensors",
     "pillow",
     "tqdm",
+    "huggingface_hub",
 ]
 
 [dependency-groups]

@@ -294,6 +294,7 @@ name = "mlx-diffusers"
 version = "0.0.1"
 source = { editable = "." }
 dependencies = [
+    { name = "huggingface-hub", marker = "platform_machine == 'arm64' and sys_platform == 'darwin'" },
     { name = "mlx", marker = "platform_machine == 'arm64' and sys_platform == 'darwin'" },
     { name = "numpy", version = "2.4.6", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.12' and platform_machine == 'arm64' and sys_platform == 'darwin'" },
     { name = "numpy", version = "2.5.4", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.12' and platform_machine == 'arm64' and sys_platform == 'darwin'" },
@@ -315,6 +316,7 @@ reference = [
 
 [package.metadata]
 requires-dist = [
+    { name = "huggingface-hub" },
     { name = "mlx" },
     { name = "numpy" },
     { name = "pillow" },

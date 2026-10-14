@@ -42,6 +42,7 @@ def test_sd15_golden_files_present():
     assert list(old.glob("*.npz")) == []
     found = sorted(path.name for path in GOLDEN_DIR.glob("sd15_*.npz"))
     assert found == [
+        "sd15_ddim.npz",
         "sd15_latents.npz",
         "sd15_modules.npz",
         "sd15_text_embeddings.npz",

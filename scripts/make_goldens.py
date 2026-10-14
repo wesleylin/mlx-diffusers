@@ -22,6 +22,10 @@ Module hooks are the inputs and outputs of one forward at timestep 999:
 - ``up_blocks.0.upsamplers.0``
 
 VAE goldens are ``decode(latents).sample`` and ``encode(decoded).latent_dist.mean``.
+
+The DDIM reference is a torch CPU fp32 20-step image for the astronaut prompt
+at seed 0, guidance 7.5, eta 0. The scheduler is ``DDIMScheduler`` built from
+the checkpoint scheduler config.
 """
 
 from __future__ import annotations
@@ -60,6 +64,8 @@ PROMPTS = (CAPTION, EMPTY_PROMPT)
 LATENT_SEED = 0
 UNET_TIMESTEPS = (999, 500, 1)
 HOOK_TIMESTEP = 999
+DDIM_STEPS = 20
+DDIM_GUIDANCE = 7.5
 
 _MISSING_OR_GATED = (
     DisabledRepoError,
@@ -342,6 +348,57 @@ def write_goldens(model_id: str, output_dir: Path) -> str:
     return resolved
 
 
+def capture_ddim_reference(model_id: str, output_dir: Path) -> str:
+    """Write the 20-step DDIM reference image, initial latents, and PNG."""
+    from diffusers import DDIMScheduler, StableDiffusionPipeline
+    from PIL import Image
+
+    resolved, _components = load_resolved(model_id)
+    pipe = StableDiffusionPipeline.from_pretrained(
+        resolved,
+        torch_dtype=torch.float32,
+        safety_checker=None,
+        feature_extractor=None,
+    )
+    pipe.scheduler = DDIMScheduler.from_config(pipe.scheduler.config)
+    pipe = pipe.to(device="cpu")
+    pipe.set_progress_bar_config(disable=True)
+    generator = torch.Generator(device="cpu").manual_seed(LATENT_SEED)
+    latents = torch.randn(
+        (1, int(pipe.unet.config.in_channels), int(pipe.unet.config.sample_size), int(pipe.unet.config.sample_size)),
+        generator=generator,
+        device="cpu",
+        dtype=torch.float32,
+    )
+    with torch.no_grad():
+        result = pipe(
+            CAPTION,
+            num_inference_steps=DDIM_STEPS,
+            guidance_scale=DDIM_GUIDANCE,
+            eta=0.0,
+            generator=torch.Generator(device="cpu").manual_seed(LATENT_SEED),
+            latents=latents,
+            output_type="pt",
+        )
+    image = result.images.detach().to(device="cpu", dtype=torch.float32).contiguous()
+    output_dir.mkdir(parents=True, exist_ok=True)
+    _savez(
+        output_dir / "sd15_ddim.npz",
+        image=image.numpy(),
+        latents=latents.numpy(),
+        num_inference_steps=np.int64(DDIM_STEPS),
+        guidance_scale=np.float32(DDIM_GUIDANCE),
+        eta=np.float32(0.0),
+        seed=np.int64(LATENT_SEED),
+        prompt=np.asarray(CAPTION),
+        model_id=np.asarray(resolved),
+    )
+    pixels = (image[0].clamp(0, 1).permute(1, 2, 0).numpy() * 255.0).round().astype(np.uint8)
+    Image.fromarray(pixels).save(output_dir / "sd15_ddim_torch.png")
+    print(f"wrote {output_dir / 'sd15_ddim_torch.png'}")
+    return resolved
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
@@ -354,13 +411,22 @@ def parse_args() -> argparse.Namespace:
         ),
     )
     parser.add_argument("--output-dir", type=Path, default=DEFAULT_OUTPUT_DIR)
+    parser.add_argument(
+        "--ddim-only",
+        action="store_true",
+        help="Capture only the 20-step DDIM reference image.",
+    )
     return parser.parse_args()
 
 
 def main() -> None:
     args = parse_args()
     torch.set_grad_enabled(False)
+    if args.ddim_only:
+        capture_ddim_reference(args.model_id, args.output_dir)
+        return
     write_goldens(args.model_id, args.output_dir)
+    capture_ddim_reference(args.model_id, args.output_dir)
 
 
 if __name__ == "__main__":
