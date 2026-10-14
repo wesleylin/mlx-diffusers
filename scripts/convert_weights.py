@@ -8,6 +8,7 @@ from __future__ import annotations
 import argparse
 from pathlib import Path
 
+import numpy as np
 from safetensors.numpy import save_file
 
 from mlx_diffusers.configuration import class_name_from_config, resolve_class_name
@@ -37,7 +38,10 @@ def convert_directory(component_dir: Path, output_path: Path) -> None:
         joined = ", ".join(converted.unmapped)
         raise SystemExit(f"unmapped keys in {class_name}: {joined}")
     output_path.parent.mkdir(parents=True, exist_ok=True)
-    save_file(converted.weights, output_path)
+    # safetensors writes the base buffer of a non-contiguous view, which turns
+    # a transpose into a reshape. Copy first so the file matches the mapper.
+    contiguous = {key: np.ascontiguousarray(value) for key, value in converted.weights.items()}
+    save_file(contiguous, output_path)
     print(
         f"wrote {output_path} class={class_name} "
         f"keys={len(converted.weights)} unmapped={len(converted.unmapped)} "

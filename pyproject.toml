@@ -32,6 +32,7 @@ environments = ["sys_platform == 'darwin' and platform_machine == 'arm64'"]
 [tool.setuptools]
 packages = [
     "mlx_diffusers",
+    "mlx_diffusers.layers",
     "mlx_diffusers.models",
     "mlx_diffusers.schedulers",
     "mlx_diffusers.pipelines",

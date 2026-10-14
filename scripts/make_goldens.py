@@ -13,11 +13,13 @@ Shape is ``(2, unet.config.in_channels, unet.config.sample_size, unet.config.sam
 UNet noise predictions use that latent batch and both CLIP embeddings at
 timesteps 999, 500, and 1.
 
-Module hooks are the outputs of one forward at timestep 999:
-- ``time_proj`` (diffusers ``Timesteps``)
+Module hooks are the inputs and outputs of one forward at timestep 999:
+- ``time_proj`` (diffusers ``Timesteps``) and ``time_embedding``
 - ``down_blocks.0``
-- ``down_blocks.0.attentions.0``
+- ``down_blocks.0.attentions.0`` and its self-attn, cross-attn, and feed-forward
 - ``down_blocks.0.resnets.0``
+- ``down_blocks.0.downsamplers.0``
+- ``up_blocks.0.upsamplers.0``
 
 VAE goldens are ``decode(latents).sample`` and ``encode(decoded).latent_dist.mean``.
 """
@@ -175,31 +177,50 @@ def _tensor_from_output(output) -> torch.Tensor:
     raise TypeError(f"cannot read a tensor from {type(output).__name__}")
 
 
-def _capture_modules(unet, latents: torch.Tensor, embeddings: torch.Tensor) -> dict[str, torch.Tensor]:
+def _to_numpy(tensor: torch.Tensor) -> np.ndarray:
+    tensor = tensor.detach().cpu().contiguous()
+    if tensor.dtype.is_floating_point:
+        tensor = tensor.float()
+    return tensor.numpy()
+
+
+def _capture_modules(unet, latents: torch.Tensor, embeddings: torch.Tensor) -> dict[str, np.ndarray]:
+    block = unet.down_blocks[0]
+    transformer = block.attentions[0].transformer_blocks[0]
     modules = {
         "timesteps_embedding": unet.time_proj,
-        "down_block": unet.down_blocks[0],
-        "attention": unet.down_blocks[0].attentions[0],
-        "resnet": unet.down_blocks[0].resnets[0],
+        "timestep_embedding": unet.time_embedding,
+        "down_block": block,
+        "attention": block.attentions[0],
+        "resnet": block.resnets[0],
+        "self_attn": transformer.attn1,
+        "cross_attn": transformer.attn2,
+        "feedforward": transformer.ff,
+        "downsample": block.downsamplers[0],
+        "upsample": unet.up_blocks[0].upsamplers[0],
     }
     if type(modules["timesteps_embedding"]).__name__ != "Timesteps":
         raise RuntimeError(
             "time_proj is "
             f"{type(modules['timesteps_embedding']).__name__}, expected Timesteps"
         )
-    captured: dict[str, torch.Tensor] = {}
+    captured: dict[str, np.ndarray] = {}
     handles = []
 
     def _hook(key: str):
-        def fn(_module, _inputs, output):
-            captured[key] = (
-                _tensor_from_output(output).detach().to(device="cpu", dtype=torch.float32).contiguous().clone()
-            )
+        def fn(_module, args, kwargs, output):
+            captured[key] = _to_numpy(_tensor_from_output(output))
+            for index, arg in enumerate(args):
+                if isinstance(arg, torch.Tensor):
+                    captured[f"{key}_arg{index}"] = _to_numpy(arg)
+            for name, arg in kwargs.items():
+                if isinstance(arg, torch.Tensor):
+                    captured[f"{key}_{name}"] = _to_numpy(arg)
 
         return fn
 
     for key, module in modules.items():
-        handles.append(module.register_forward_hook(_hook(key)))
+        handles.append(module.register_forward_hook(_hook(key), with_kwargs=True))
     try:
         with torch.no_grad():
             noise_pred = unet(latents, HOOK_TIMESTEP, encoder_hidden_states=embeddings).sample
@@ -303,14 +324,17 @@ def write_goldens(model_id: str, output_dir: Path) -> str:
     )
     _savez(
         output_dir / "sd15_modules.npz",
-        timesteps_embedding=module_outputs["timesteps_embedding"].numpy(),
-        down_block=module_outputs["down_block"].numpy(),
-        attention=module_outputs["attention"].numpy(),
-        resnet=module_outputs["resnet"].numpy(),
+        **module_outputs,
         timesteps_module=np.asarray("time_proj"),
+        timestep_embedding_module=np.asarray("time_embedding"),
         down_block_module=np.asarray("down_blocks.0"),
         attention_module=np.asarray("down_blocks.0.attentions.0"),
         resnet_module=np.asarray("down_blocks.0.resnets.0"),
+        self_attn_module=np.asarray("down_blocks.0.attentions.0.transformer_blocks.0.attn1"),
+        cross_attn_module=np.asarray("down_blocks.0.attentions.0.transformer_blocks.0.attn2"),
+        feedforward_module=np.asarray("down_blocks.0.attentions.0.transformer_blocks.0.ff"),
+        downsample_module=np.asarray("down_blocks.0.downsamplers.0"),
+        upsample_module=np.asarray("up_blocks.0.upsamplers.0"),
         hook_timestep=np.int64(HOOK_TIMESTEP),
         model_id=model_id_array,
     )

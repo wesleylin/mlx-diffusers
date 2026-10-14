@@ -159,3 +159,22 @@ def test_sd15_components_have_no_unmapped_keys_and_transposed_shapes():
         assert tuple(original[spec["conv"]].shape) == spec["conv_before"]
         assert tuple(conv.shape) == spec["conv_after"]
         assert np.allclose(np.array(conv), np.transpose(original[spec["conv"]], (2, 3, 1, 0)))
+
+
+def test_saved_conversion_keeps_transpose(tmp_path: Path):
+    import importlib.util
+
+    script = Path(__file__).resolve().parents[1] / "scripts" / "convert_weights.py"
+    spec = importlib.util.spec_from_file_location("convert_weights", script)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    linear = np.arange(6, dtype=np.float32).reshape(2, 3)
+    source = tmp_path / "unet"
+    _write_component(source, {"_class_name": "UNet2DConditionModel"}, {"proj.weight": linear})
+    output = tmp_path / "unet.safetensors"
+    module.convert_directory(source, output)
+    from safetensors import safe_open
+
+    with safe_open(output, framework="numpy") as handle:
+        saved = handle.get_tensor("proj.weight")
+    assert np.array_equal(saved, linear.T)
