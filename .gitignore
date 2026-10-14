@@ -6,3 +6,4 @@ references/
 .DS_Store
 dist
 *.egg-info
+converted/

@@ -6,7 +6,7 @@ Human checks (not automated): eyeballing overfit samples (phase 8) and ComfyUI l
 
 - [x] **0 — Scaffold + environment.** `uv sync` and `uv run pytest` pass on Apple Silicon, `mx.eval(mx.array([1.0]))` works, this file exists.
 - [x] **1 — Golden harness for SD1.5.** `scripts/make_goldens.py` writes `tests/goldens/sd15/*.npz`; smoke test loads each npz and asserts shapes/dtypes. Captured `stable-diffusion-v1-5/stable-diffusion-v1-5` on CPU in fp32. Caption: "a photograph of an astronaut riding a horse"; the second prompt is empty.
-- [ ] **2 — Weight conversion.** Registry, mappers, and `load_model`. Zero unmapped keys, post-transpose shapes match, unknown `_class_name` raises.
+- [x] **2 — Weight conversion.** Registry, mappers, and `load_model`. Zero unmapped keys, post-transpose shapes match, unknown `_class_name` raises. SD1.5 unet, vae, and text_encoder from the local cache each have 0 unmapped keys. Module classes are not registered yet.
 - [ ] **3 — Core modules fp32.** Timesteps, Resnet, Attention, FeedForward, Transformer2D, up/downsample pass module gates vs torch hooks.
 - [ ] **4 — CLIP text encoder.** SD1.5 ViT-L/14 `last_hidden_state` matches golden for both prompts.
 - [ ] **5 — AutoencoderKL.** Decode image and encode posterior mean match gates.
