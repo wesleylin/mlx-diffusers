@@ -23,7 +23,7 @@ class ResnetBlock2D(nn.Module):
         in_channels: int,
         out_channels: int | None = None,
         dropout: float = 0.0,
-        temb_channels: int = 512,
+        temb_channels: int | None = 512,
         groups: int = 32,
         eps: float = 1e-6,
         non_linearity: str = "swish",
@@ -40,7 +40,7 @@ class ResnetBlock2D(nn.Module):
         self.output_scale_factor = output_scale_factor
         self.norm1 = GroupNorm(groups, in_channels, eps)
         self.conv1 = Conv2d(in_channels, out_channels, kernel_size=3, stride=1, padding=1)
-        self.time_emb_proj = nn.Linear(temb_channels, out_channels)
+        self.time_emb_proj = None if temb_channels is None else nn.Linear(temb_channels, out_channels)
         self.norm2 = GroupNorm(groups, out_channels, eps)
         self.dropout = nn.Dropout(dropout)
         self.conv2 = Conv2d(out_channels, out_channels, kernel_size=3, stride=1, padding=1)
@@ -51,12 +51,12 @@ class ResnetBlock2D(nn.Module):
         if use_in_shortcut:
             self.conv_shortcut = Conv2d(in_channels, out_channels, kernel_size=1, stride=1, padding=0)
 
-    def __call__(self, input_tensor: mx.array, temb: mx.array) -> mx.array:
+    def __call__(self, input_tensor: mx.array, temb: mx.array | None = None) -> mx.array:
         hidden_states = self.nonlinearity(self.norm1(input_tensor))
         hidden_states = self.conv1(hidden_states)
-        temb = self.time_emb_proj(self.nonlinearity(temb))
-        temb = temb[:, :, None, None]
-        hidden_states = hidden_states + temb
+        if self.time_emb_proj is not None:
+            temb = self.time_emb_proj(self.nonlinearity(temb))
+            hidden_states = hidden_states + temb[:, :, None, None]
         hidden_states = self.nonlinearity(self.norm2(hidden_states))
         hidden_states = self.conv2(self.dropout(hidden_states))
         if self.conv_shortcut is not None:
