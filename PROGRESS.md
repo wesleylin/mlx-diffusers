@@ -10,7 +10,7 @@ Human checks (not automated): eyeballing overfit samples (phase 8) and ComfyUI l
 - [x] **3 — Core modules fp32.** Timesteps, TimestepEmbedding, Resnet, self/cross Attention, FeedForward, Transformer2D, up/downsample, and the first down block pass the module gate (mean abs < 1e-5 and max abs < 5e-4) on the timestep-999 hooks.
 - [x] **4 — CLIP text encoder.** SD1.5 ViT-L/14 `last_hidden_state` matches the embedding gate (mean abs < 1e-5 and max abs < 1e-3) for both prompts and the batch.
 - [x] **5 — AutoencoderKL.** Decode image and encode posterior mean match the full-model gate (mean abs < 1e-5 and max abs < 1e-3). `scaling_factor` is not applied inside encode or decode.
-- [ ] **6 — SD1.5 UNet.** Single-step noise pred at timesteps 999, 500, and 1 within full-UNet gates. No sampling.
+- [x] **6 — SD1.5 UNet.** Single-step noise pred at timesteps 999, 500, and 1 within full-UNet gates. No sampling.
 - [ ] **7 — Schedulers + SD1.5 pipeline.** 20-step DDIM within the end-to-end gate; reference and MLX PNGs committed side by side.
 - [ ] **8 — SD1.5 LoRA training.** Overfit loss falls and checkpoint roundtrip is clean. Human check: eyeball overfit samples.
 - [ ] **9 — SDXL inference.** 25-step end-to-end matches the reference gate. New arch and pipeline code; no SDXL special case inside an existing `layers/` module. A general numeric bugfix is allowed. A new config-driven layer file requires a design note here.

@@ -48,9 +48,11 @@ ARCH_REGISTRY: dict[str, ArchEntry] = {name: ArchEntry(name) for name in ARCH_RE
 def _register_builtin_modules() -> None:
     from mlx_diffusers.models.autoencoder_kl import AutoencoderKL
     from mlx_diffusers.models.clip_text_model import CLIPTextModel
+    from mlx_diffusers.models.unet_2d_condition import UNet2DConditionModel
 
     ARCH_REGISTRY["CLIPTextModel"].cls = CLIPTextModel
     ARCH_REGISTRY["AutoencoderKL"].cls = AutoencoderKL
+    ARCH_REGISTRY["UNet2DConditionModel"].cls = UNet2DConditionModel
 
 
 _register_builtin_modules()

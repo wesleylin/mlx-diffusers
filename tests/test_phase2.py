@@ -55,29 +55,28 @@ def test_alias_is_not_a_second_registry():
     assert set(CONVERTERS) == set(ARCH_REGISTRY)
     assert ARCH_REGISTRY["CLIPTextModel"].cls is not None
     assert ARCH_REGISTRY["AutoencoderKL"].cls is not None
-    assert ARCH_REGISTRY["UNet2DConditionModel"].cls is None
+    assert ARCH_REGISTRY["UNet2DConditionModel"].cls is not None
 
 
-def test_known_class_returns_weights_without_a_module(tmp_path: Path):
+def test_known_class_transposes_without_building_the_module():
+    """Synthetic keys are not a loadable UNet. The mapper still transposes them."""
+    from mlx_diffusers.utils.convert import map_unet
+
     conv = np.arange(8 * 4 * 3 * 3, dtype=np.float32).reshape(8, 4, 3, 3)
     linear = np.arange(6 * 5, dtype=np.float32).reshape(6, 5)
-    _write_component(
-        tmp_path,
+    converted = map_unet(
+        {
+            "conv.weight": conv,
+            "proj.weight": linear,
+            "proj.bias": np.zeros(6, dtype=np.float32),
+        },
         {"_class_name": "UNet2DConditionModel"},
-        {"conv.weight": conv, "proj.weight": linear, "proj.bias": np.zeros(6, dtype=np.float32)},
     )
-    result = load_model(tmp_path)
-    assert result.class_name == "UNet2DConditionModel"
-    assert result.module_registered is False
-    assert result.message == "module is not registered"
-    assert result.unmapped == ()
-    conv_out = result.weights["conv.weight"]
-    linear_out = result.weights["proj.weight"]
-    mx.eval(conv_out, linear_out)
-    assert tuple(conv_out.shape) == (3, 3, 4, 8)
-    assert tuple(linear_out.shape) == (5, 6)
-    assert np.allclose(np.array(conv_out), np.transpose(conv, (2, 3, 1, 0)))
-    assert np.allclose(np.array(linear_out), linear.T)
+    assert converted.unmapped == []
+    assert tuple(converted.weights["conv.weight"].shape) == (3, 3, 4, 8)
+    assert tuple(converted.weights["proj.weight"].shape) == (5, 6)
+    assert np.allclose(converted.weights["conv.weight"], np.transpose(conv, (2, 3, 1, 0)))
+    assert np.allclose(converted.weights["proj.weight"], linear.T)
 
 
 def test_sharded_safetensors_round_trip(tmp_path: Path):
@@ -141,7 +140,7 @@ def test_sd15_components_have_no_unmapped_keys_and_transposed_shapes():
         result = load_model(snapshot / name)
         assert result.class_name == spec["class_name"]
         assert result.unmapped == ()
-        assert result.module_registered is (name in {"text_encoder", "vae"})
+        assert result.module_registered is True
         assert set(result.weights) == set(original)
         linear = result.weights[spec["linear"]]
         mx.eval(linear)
