@@ -7,3 +7,5 @@ references/
 dist
 *.egg-info
 converted/
+tests/goldens/sd15/overfit/cache/
+tests/goldens/sd15/overfit/checkpoint.npz

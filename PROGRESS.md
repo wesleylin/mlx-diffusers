@@ -12,6 +12,6 @@ Human checks (not automated): eyeballing overfit samples (phase 8) and ComfyUI l
 - [x] **5 — AutoencoderKL.** Decode image and encode posterior mean match the full-model gate (mean abs < 1e-5 and max abs < 1e-3). `scaling_factor` is not applied inside encode or decode.
 - [x] **6 — SD1.5 UNet.** Single-step noise pred at timesteps 999, 500, and 1 within full-UNet gates. No sampling.
 - [x] **7 — Schedulers + SD1.5 pipeline.** 20-step DDIM within the end-to-end gate; reference and MLX PNGs committed side by side.
-- [x] **8 — SD1.5 LoRA training.** Short overfit: 2 images, rank 8, lr 1e-4, 40 steps. Fixed-batch loss fell from 0.2589 to 0.2556. Resume matched and the export roundtrip was exact. Human check: eyeball overfit samples, not confirmed.
+- [x] **8 — SD1.5 LoRA training.** Short overfit: 2 images, rank 8, lr 1e-4, 40 steps. Fixed-batch loss fell from 0.2589 to 0.2556. Resume matched and the export roundtrip was exact. Human check: overfit samples visually accepted on 2026-10-14.
 - [ ] **9 — SDXL inference.** 25-step end-to-end matches the reference gate. New arch and pipeline code; no SDXL special case inside an existing `layers/` module. A general numeric bugfix is allowed. A new config-driven layer file requires a design note here.
 - [ ] **10 — Animagine / SDXL LoRA.** `from_pretrained` on `cagliostrolab/animagine-xl-3.1` with zero new model code. Overfit and a real small run stay finite; kohya-style export. Human check: ComfyUI loads the LoRA.
