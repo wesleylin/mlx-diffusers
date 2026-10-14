@@ -44,7 +44,7 @@ from huggingface_hub.errors import (
 from transformers import CLIPTextModel, CLIPTokenizer
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
-DEFAULT_OUTPUT_DIR = REPO_ROOT / "tests" / "golden"
+DEFAULT_OUTPUT_DIR = REPO_ROOT / "tests" / "goldens" / "sd15"
 
 SD15_MIRROR = "stable-diffusion-v1-5/stable-diffusion-v1-5"
 SD15_FALLBACK = "CompVis/stable-diffusion-v1-4"

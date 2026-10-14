@@ -6,7 +6,7 @@ import numpy as np
 
 from mlx_diffusers.utils.golden import compare, load_golden
 
-GOLDEN_DIR = Path(__file__).parent / "golden"
+GOLDEN_DIR = Path(__file__).parent / "goldens" / "sd15"
 MODEL_ID = "stable-diffusion-v1-5/stable-diffusion-v1-5"
 CAPTION = "a photograph of an astronaut riding a horse"
 
@@ -38,6 +38,8 @@ def _assert_model_id(arrays: dict[str, np.ndarray]) -> None:
 
 
 def test_sd15_golden_files_present():
+    old = Path(__file__).parent / "golden"
+    assert list(old.glob("*.npz")) == []
     found = sorted(path.name for path in GOLDEN_DIR.glob("sd15_*.npz"))
     assert found == [
         "sd15_latents.npz",
