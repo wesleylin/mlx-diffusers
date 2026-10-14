@@ -22,7 +22,7 @@ Pure-MLX library for diffusion models on Apple Silicon. End state: train an Anim
 
 ## Golden-tensor protocol
 
-Documented for later phases. Do not implement until the phase that owns it.
+Phase 1 writes the SD1.5 files. Later phases extend this protocol per model family. Do not loosen the gates below.
 
 `scripts/make_goldens.py` runs the PyTorch reference on CPU, fp32, seeded, and saves float32 `.npz` per model family:
 
