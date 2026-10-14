@@ -6,6 +6,7 @@ import json
 from pathlib import Path
 
 import mlx.core as mx
+import pytest
 import mlx.nn as nn
 from safetensors import safe_open
 
@@ -19,6 +20,7 @@ from mlx_diffusers.models.transformer_2d import Transformer2DModel
 from mlx_diffusers.utils.golden import compare, load_golden
 
 GOLDEN = Path(__file__).parent / "goldens" / "sd15" / "sd15_modules.npz"
+MODULE_INPUTS = Path(__file__).parent / "goldens" / "sd15" / "module_inputs" / "sd15_module_inputs.npz"
 WEIGHTS = Path(__file__).resolve().parents[1] / "converted" / "sd15" / "unet.safetensors"
 SD15_ID = "stable-diffusion-v1-5/stable-diffusion-v1-5"
 MEAN_LIMIT = 1e-5
@@ -138,8 +140,13 @@ def test_layers_do_not_hardcode_cross_attention_width():
 
 
 def test_phase3_module_gates():
+    if not MODULE_INPUTS.is_file():
+        pytest.skip(
+            "module input activations are gitignored and were not generated; "
+            f"missing {MODULE_INPUTS}. Run scripts/make_goldens.py to write them."
+        )
     config = _config()
-    golden = load_golden(GOLDEN)
+    golden = {**load_golden(MODULE_INPUTS), **load_golden(GOLDEN)}
     channels = int(config["block_out_channels"][0])
     temb_channels = channels * 4
     heads = _heads(config)

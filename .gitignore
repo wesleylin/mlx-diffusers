@@ -9,3 +9,4 @@ dist
 converted/
 tests/goldens/sd15/overfit/cache/
 tests/goldens/sd15/overfit/checkpoint.npz
+tests/goldens/sd15/module_inputs/

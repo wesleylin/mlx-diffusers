@@ -21,6 +21,11 @@ Module hooks are the inputs and outputs of one forward at timestep 999:
 - ``down_blocks.0.downsamplers.0``
 - ``up_blocks.0.upsamplers.0``
 
+Committed ``sd15_modules.npz`` keeps hook outputs: timesteps embedding, one
+ResNet, one attention block, one down block, and any other output under 3MB.
+Module inputs and the larger hook outputs are written to
+``module_inputs/``, which is gitignored.
+
 VAE goldens are ``decode(latents).sample`` and ``encode(decoded).latent_dist.mean``.
 
 The DDIM reference is a torch CPU fp32 20-step image for the astronaut prompt
@@ -64,6 +69,21 @@ PROMPTS = (CAPTION, EMPTY_PROMPT)
 LATENT_SEED = 0
 UNET_TIMESTEPS = (999, 500, 1)
 HOOK_TIMESTEP = 999
+COMMITTED_MODULE_OUTPUTS = {
+    "timesteps_embedding",
+    "timestep_embedding",
+    "resnet",
+    "attention",
+    "down_block",
+}
+MODULE_OUTPUT_KEYS = COMMITTED_MODULE_OUTPUTS | {
+    "self_attn",
+    "cross_attn",
+    "feedforward",
+    "downsample",
+    "upsample",
+}
+OTHER_OUTPUT_MAX_BYTES = 3_000_000
 DDIM_STEPS = 20
 DDIM_GUIDANCE = 7.5
 
@@ -267,6 +287,15 @@ def _vae_goldens(vae, latents: torch.Tensor) -> tuple[np.ndarray, np.ndarray]:
     )
 
 
+def _commit_module_key(key: str, array: np.ndarray) -> bool:
+    """Keep small hook outputs in git. Inputs stay out of the committed npz."""
+    if key.endswith("_module") or key in {"hook_timestep", "model_id"}:
+        return True
+    if key in COMMITTED_MODULE_OUTPUTS:
+        return True
+    return key in MODULE_OUTPUT_KEYS and int(array.nbytes) < OTHER_OUTPUT_MAX_BYTES
+
+
 def _savez(path: Path, **arrays: np.ndarray) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     np.savez(path, **arrays)
@@ -328,22 +357,25 @@ def write_goldens(model_id: str, output_dir: Path) -> str:
         posterior_mean=posterior_mean,
         model_id=model_id_array,
     )
-    _savez(
-        output_dir / "sd15_modules.npz",
+    module_record = {
         **module_outputs,
-        timesteps_module=np.asarray("time_proj"),
-        timestep_embedding_module=np.asarray("time_embedding"),
-        down_block_module=np.asarray("down_blocks.0"),
-        attention_module=np.asarray("down_blocks.0.attentions.0"),
-        resnet_module=np.asarray("down_blocks.0.resnets.0"),
-        self_attn_module=np.asarray("down_blocks.0.attentions.0.transformer_blocks.0.attn1"),
-        cross_attn_module=np.asarray("down_blocks.0.attentions.0.transformer_blocks.0.attn2"),
-        feedforward_module=np.asarray("down_blocks.0.attentions.0.transformer_blocks.0.ff"),
-        downsample_module=np.asarray("down_blocks.0.downsamplers.0"),
-        upsample_module=np.asarray("up_blocks.0.upsamplers.0"),
-        hook_timestep=np.int64(HOOK_TIMESTEP),
-        model_id=model_id_array,
-    )
+        "timesteps_module": np.asarray("time_proj"),
+        "timestep_embedding_module": np.asarray("time_embedding"),
+        "down_block_module": np.asarray("down_blocks.0"),
+        "attention_module": np.asarray("down_blocks.0.attentions.0"),
+        "resnet_module": np.asarray("down_blocks.0.resnets.0"),
+        "self_attn_module": np.asarray("down_blocks.0.attentions.0.transformer_blocks.0.attn1"),
+        "cross_attn_module": np.asarray("down_blocks.0.attentions.0.transformer_blocks.0.attn2"),
+        "feedforward_module": np.asarray("down_blocks.0.attentions.0.transformer_blocks.0.ff"),
+        "downsample_module": np.asarray("down_blocks.0.downsamplers.0"),
+        "upsample_module": np.asarray("up_blocks.0.upsamplers.0"),
+        "hook_timestep": np.int64(HOOK_TIMESTEP),
+        "model_id": model_id_array,
+    }
+    committed = {key: value for key, value in module_record.items() if _commit_module_key(key, value)}
+    sidecar = {key: value for key, value in module_record.items() if key not in committed}
+    _savez(output_dir / "sd15_modules.npz", **committed)
+    _savez(output_dir / "module_inputs" / "sd15_module_inputs.npz", **sidecar)
     print(f"captured_model_id={resolved}")
     return resolved
 
