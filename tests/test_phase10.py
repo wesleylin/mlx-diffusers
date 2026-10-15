@@ -132,3 +132,65 @@ def test_trainer_uses_pooled_and_time_ids():
     after = fixed_batch_loss(model, examples[0], alphas, step=3)
     assert np.isfinite(before) and np.isfinite(after)
     assert result["losses"]
+
+
+def test_attention_sublayer_tape_matches_full_backward():
+    from mlx.utils import tree_flatten
+
+    from mlx_diffusers.models.unet_sdxl import UNet2DConditionXL
+
+    mx.random.seed(0)
+    model = UNet2DConditionXL(
+        {
+            "addition_embed_type": "text_time",
+            "in_channels": 4,
+            "out_channels": 4,
+            "block_out_channels": [32],
+            "down_block_types": ["CrossAttnDownBlock2D"],
+            "up_block_types": ["CrossAttnUpBlock2D"],
+            "layers_per_block": 1,
+            "transformer_layers_per_block": 2,
+            "num_attention_heads": 4,
+            "cross_attention_dim": 16,
+            "norm_num_groups": 4,
+            "norm_eps": 1e-5,
+            "act_fn": "silu",
+            "downsample_padding": 1,
+            "flip_sin_to_cos": True,
+            "freq_shift": 0,
+            "addition_time_embed_dim": 4,
+            "projection_class_embeddings_input_dim": 32,
+        }
+    )
+    inject(model, rank=2, alpha=2)
+    for _, module in model.named_modules():
+        if hasattr(module, "lora_b"):
+            module.lora_b = mx.random.normal(module.lora_b.shape) * 0.02
+    latent = mx.random.normal((1, 4, 8, 8))
+    embedding = mx.random.normal((1, 4, 16))
+    noise = mx.random.normal((1, 4, 8, 8))
+    text = mx.random.normal((1, 8))
+    time_ids = mx.zeros((1, 6))
+    alpha = mx.array(0.5)
+    timestep = mx.array([3])
+    loss_s, grads_s = model.segmented_loss(latent, embedding, noise, alpha, timestep, text, time_ids)
+
+    def full(latent, embedding, noise, alpha, timestep, text, time_ids):
+        noisy = mx.sqrt(alpha) * latent + mx.sqrt(1.0 - alpha) * noise
+        pred = model(noisy, timestep, embedding, {"text_embeds": text, "time_ids": time_ids})
+        diff = pred.astype(mx.float32) - noise.astype(mx.float32)
+        return mx.mean(diff * diff)
+
+    loss_f, grads_f = nn.value_and_grad(model, full)(latent, embedding, noise, alpha, timestep, text, time_ids)
+    mx.eval(loss_s, loss_f, grads_s, grads_f)
+    assert abs(float(loss_s) - float(loss_f)) < 1e-5
+    worst = 0.0
+    nonzero = 0
+    for (key_s, grad_s), (key_f, grad_f) in zip(tree_flatten(grads_s), tree_flatten(grads_f)):
+        assert key_s == key_f
+        gap = float(mx.max(mx.abs(grad_s - grad_f)))
+        worst = max(worst, gap)
+        if key_s.endswith(".lora_b") and float(mx.max(mx.abs(grad_s))) > 0:
+            nonzero += 1
+    assert nonzero > 0
+    assert worst < 1e-4
