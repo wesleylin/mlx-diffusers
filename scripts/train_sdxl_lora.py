@@ -2,7 +2,8 @@
 
 The base pipeline draws the images. Training loads
 ``cagliostrolab/animagine-xl-3.1`` with the SDXL classes. Rank 8, lr 1e-4,
-about 40 steps, 768px, batch 1, cached conditioning. This is not the 2k-step run.
+about 40 steps, 768px, batch 1, cached conditioning. ``--stability``
+continues that cache toward 2000 steps and does not draw new images.
 """
 
 from __future__ import annotations
@@ -11,6 +12,7 @@ import argparse
 import gc
 import importlib.util
 import json
+import math
 import shutil
 from pathlib import Path
 
@@ -21,6 +23,7 @@ from PIL import Image
 
 from mlx_diffusers.configuration import load_model
 from mlx_diffusers.pipelines.pipeline_utils import from_pretrained
+from mlx_diffusers.schedulers.scheduling_euler import EulerDiscreteScheduler
 from mlx_diffusers.training.dataset import cache_examples, list_examples, load_cache
 from mlx_diffusers.training.lora import inject, load_kohya, lora_arrays, save_kohya, zero_lora_b
 from mlx_diffusers.training.trainer import fixed_batch_loss, load_checkpoint, train, write_loss_log
@@ -30,6 +33,8 @@ OVERFIT = REPO_ROOT / "tests" / "goldens" / "sdxl" / "overfit"
 DATASET = OVERFIT / "dataset"
 CAPTION = "a photograph of a brilvexonq, a bright magenta lantern"
 ANIMAGINE = "cagliostrolab/animagine-xl-3.1"
+MEMORY_LIMIT = 12 * 1024 ** 3
+STABILITY_LOG = OVERFIT / "stability.json"
 MEDIA = (
     Path.home()
     / "Library"
@@ -109,6 +114,87 @@ def _validate(pipeline, output: Path) -> None:
     print(f"wrote {output}", flush=True)
 
 
+def _stability_record(losses: list[float], peaks: list[float], *, stopped: str | None) -> dict:
+    finite = bool(losses) and all(math.isfinite(value) for value in losses)
+    return {
+        "steps_completed": len(losses),
+        "first": losses[0] if losses else None,
+        "last": losses[-1] if losses else None,
+        "max_peak_gb": max(peaks) if peaks else None,
+        "finite": finite and stopped is None,
+        "stopped": stopped,
+        "losses": losses,
+        "peak_gb": peaks,
+    }
+
+
+def _run_stability(args) -> None:
+    """2000-step finite check on the cached 2-image set. No new images."""
+    cache_dir = OVERFIT / "cache"
+    if not any(cache_dir.glob("*.npz")):
+        raise SystemExit(f"missing cached latents in {cache_dir}")
+    mx.set_memory_limit(MEMORY_LIMIT)
+    mx.set_cache_limit(512 * 1024 ** 2)
+    from huggingface_hub import snapshot_download
+
+    model_dir = Path(snapshot_download(args.model))
+    print(f"loading unet from {model_dir.name}", flush=True)
+    unet = load_model(model_dir / "unet").module
+    with (model_dir / "scheduler" / "scheduler_config.json").open() as handle:
+        scheduler_config = json.load(handle)
+    alphas = EulerDiscreteScheduler.from_config(scheduler_config).alphas_cumprod
+    mx.random.seed(0)
+    names = inject(unet, args.rank, args.alpha)
+    unet.enable_gradient_checkpointing()
+    print(f"injected {len(names)} projections", flush=True)
+    examples = load_cache(cache_dir)
+    gc.collect()
+    mx.clear_cache()
+    mx.reset_peak_memory()
+    losses: list[float] = []
+    peaks: list[float] = []
+    stopped: str | None = None
+
+    def _log(step, loss):
+        nonlocal stopped
+        peak = mx.get_peak_memory() / (1024 ** 3)
+        active = mx.get_active_memory() / (1024 ** 3)
+        print(f"step {step} loss {loss:.6f} peak_gb {peak:.2f} active_gb {active:.2f}", flush=True)
+        losses.append(loss)
+        peaks.append(peak)
+        if not math.isfinite(loss):
+            stopped = f"nan at step {step}"
+        elif peak > 12.0:
+            stopped = f"memory {peak:.2f} GB at step {step}"
+        if stopped is not None or step % 25 == 0:
+            write_loss_log(STABILITY_LOG, _stability_record(losses, peaks, stopped=stopped))
+        mx.clear_cache()
+        mx.reset_peak_memory()
+        if stopped is not None:
+            raise SystemExit(stopped)
+
+    try:
+        train(
+            unet,
+            examples,
+            alphas,
+            steps=args.steps,
+            learning_rate=args.lr,
+            rank=args.rank,
+            alpha=args.alpha,
+            on_step=_log,
+        )
+    except SystemExit:
+        write_loss_log(STABILITY_LOG, _stability_record(losses, peaks, stopped=stopped))
+        raise
+    record = _stability_record(losses, peaks, stopped=None)
+    write_loss_log(STABILITY_LOG, record)
+    print(
+        json.dumps({key: record[key] for key in ("steps_completed", "first", "last", "max_peak_gb", "finite")}),
+        flush=True,
+    )
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--model", default=ANIMAGINE)
@@ -118,7 +204,11 @@ def main() -> None:
     parser.add_argument("--lr", type=float, default=1e-4)
     parser.add_argument("--image-steps", type=int, default=8)
     parser.add_argument("--target-size", type=int, default=768)
+    parser.add_argument("--stability", action="store_true", help="train the cached 2-image set and skip image generation")
     args = parser.parse_args()
+    if args.stability:
+        _run_stability(args)
+        return
     # Leave headroom on a 16GB machine. The limit is a ceiling, not a target allocation.
     mx.set_memory_limit(12 * 1024 ** 3)
     mx.set_cache_limit(512 * 1024 ** 2)
