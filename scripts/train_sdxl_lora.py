@@ -148,6 +148,7 @@ def _run_stability(args) -> None:
     names = inject(unet, args.rank, args.alpha)
     unet.enable_gradient_checkpointing()
     print(f"injected {len(names)} projections", flush=True)
+    print("train holds the unet only", flush=True)
     examples = load_cache(cache_dir)
     gc.collect()
     mx.clear_cache()
@@ -253,11 +254,13 @@ def main() -> None:
     alphas = pipeline.scheduler.alphas_cumprod
     if not (OVERFIT / "early.png").is_file():
         _validate(pipeline, OVERFIT / "early.png")
-    pipeline.text_encoder = None
-    pipeline.text_encoder_2 = None
-    pipeline.vae = None
+    pipeline.release_for_training()
     gc.collect()
     mx.clear_cache()
+    held = pipeline.conditioning_resident()
+    if held:
+        raise RuntimeError(f"still resident during train: {held}")
+    print("train holds the unet only", flush=True)
     mx.reset_peak_memory()
     start_fixed = fixed_batch_loss(pipeline.unet, examples[0], alphas, step=10_000)
     half = args.steps // 2

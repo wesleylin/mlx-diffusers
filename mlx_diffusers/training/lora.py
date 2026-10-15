@@ -29,8 +29,8 @@ class LoRALinear(nn.Module):
         self.alpha = float(alpha)
         self.scale = float(alpha) / float(rank)
         bound = 1 / math.sqrt(input_dims)
-        self.lora_a = mx.random.uniform(low=-bound, high=bound, shape=(input_dims, rank))
-        self.lora_b = mx.zeros((rank, output_dims))
+        self.lora_a = mx.random.uniform(low=-bound, high=bound, shape=(input_dims, rank)).astype(mx.float32)
+        self.lora_b = mx.zeros((rank, output_dims), dtype=mx.float32)
 
     def __call__(self, x: mx.array) -> mx.array:
         base = self.linear(x)

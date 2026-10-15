@@ -107,6 +107,7 @@ def train(
         mx.eval(clipped)
         optimizer.update(model, clipped)
         mx.eval(model.parameters())
+        _fp32_optimizer_state(optimizer)
         mean_loss = sum(float(value.item()) for value in micro_losses) / len(micro_losses)
         losses.append(mean_loss)
         if on_step is not None:
@@ -167,6 +168,21 @@ def fixed_batch_loss(model: nn.Module, example: dict[str, np.ndarray], alphas_cu
     loss = prediction_loss(*arguments)
     mx.eval(loss)
     return float(loss.item())
+
+
+def _fp32_optimizer_state(optimizer: optim.Optimizer) -> None:
+    """Adam moments stay float32 even when the frozen base is float16."""
+    state = getattr(optimizer, "state", None)
+    if not state:
+        return
+
+    def cast(value):
+        if isinstance(value, mx.array) and mx.issubdtype(value.dtype, mx.floating) and value.dtype != mx.float32:
+            return value.astype(mx.float32)
+        return value
+
+    optimizer.state = tree_map(cast, state)
+    mx.eval(optimizer.state)
 
 
 def write_loss_log(path: Path, record: dict) -> None:

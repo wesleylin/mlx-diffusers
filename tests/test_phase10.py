@@ -6,6 +6,7 @@ import mlx.core as mx
 import mlx.nn as nn
 import numpy as np
 
+from mlx_diffusers.pipelines.pipeline_stable_diffusion_xl import StableDiffusionXLPipeline
 from mlx_diffusers.training.dataset import area_buckets, choose_bucket
 from mlx_diffusers.training.lora import inject, load_kohya, lora_arrays, save_kohya
 from mlx_diffusers.training.trainer import fixed_batch_loss, train
@@ -64,6 +65,41 @@ def test_kohya_export_roundtrip_includes_alpha(tmp_path: Path):
     copied = lora_arrays(unet)
     for key in original:
         assert np.max(np.abs(original[key] - copied[key])) == 0
+
+
+def test_lora_and_adam_stay_fp32_on_an_fp16_base():
+    mx.random.seed(0)
+    model = TinyXL()
+    model.to_q.weight = model.to_q.weight.astype(mx.float16)
+    inject(model, rank=2, alpha=2)
+    assert model.to_q.linear.weight.dtype == mx.float16
+    assert model.to_q.lora_a.dtype == mx.float32
+    assert model.to_q.lora_b.dtype == mx.float32
+    generator = np.random.Generator(np.random.PCG64(0))
+    example = {
+        "latent": generator.standard_normal((1, 4), dtype=np.float32),
+        "embedding": generator.standard_normal((1, 2, 4), dtype=np.float32),
+        "text_embeds": generator.standard_normal((1, 4), dtype=np.float32),
+        "time_ids": np.array([[64, 64, 0, 0, 64, 64]], dtype=np.float32),
+        "caption": "toy",
+    }
+    alphas = mx.array(np.linspace(0.99, 0.1, 8, dtype=np.float32))
+    result = train(model, [example], alphas, steps=1, learning_rate=1e-2, rank=2, alpha=2)
+    from mlx.utils import tree_flatten
+
+    floating = [
+        value.dtype
+        for _, value in tree_flatten(result["optimizer"].state)
+        if isinstance(value, mx.array) and mx.issubdtype(value.dtype, mx.floating)
+    ]
+    assert floating
+    assert set(floating) == {mx.float32}
+
+
+def test_release_for_training_drops_vae_and_encoders():
+    pipeline = StableDiffusionXLPipeline(None, None, object(), object(), object(), object(), None, {}, 4, 128, 8, True)
+    pipeline.release_for_training()
+    assert pipeline.conditioning_resident() == []
 
 
 def test_trainer_uses_pooled_and_time_ids():
