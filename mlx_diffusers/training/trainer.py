@@ -19,10 +19,28 @@ from mlx.utils import tree_flatten, tree_map, tree_unflatten
 from mlx_diffusers.training.lora import lora_arrays, save_lora
 
 
-def prediction_loss(model, latent, embedding, noise, alpha, timestep) -> mx.array:
+def prediction_loss(
+    model,
+    latent,
+    embedding,
+    noise,
+    alpha,
+    timestep,
+    text_embeds=None,
+    time_ids=None,
+) -> mx.array:
     noisy = mx.sqrt(alpha) * latent + mx.sqrt(1.0 - alpha) * noise
-    prediction = model(noisy, timestep, embedding)
-    return mx.mean((prediction - noise) ** 2)
+    if text_embeds is None:
+        prediction = model(noisy, timestep, embedding)
+    else:
+        prediction = model(
+            noisy,
+            timestep,
+            embedding,
+            {"text_embeds": text_embeds, "time_ids": time_ids},
+        )
+    # Compare in fp32. An fp16 UNet output stays fp16 so the backward graph does not upcast.
+    return mx.mean((prediction.astype(mx.float32) - noise.astype(mx.float32)) ** 2)
 
 
 def _batch_noise(example: dict[str, np.ndarray], step: int, num_train_timesteps: int):
@@ -66,14 +84,21 @@ def train(
             example = examples[(step * grad_accumulation + micro) % len(examples)]
             timestep, noise_np = _batch_noise(example, step * grad_accumulation + micro, num_train)
             alpha = alphas_cumprod[timestep]
-            loss, grads = loss_and_grad(
+            arguments = [
                 model,
                 mx.array(example["latent"]),
                 mx.array(example["embedding"]),
                 mx.array(noise_np),
                 alpha,
                 mx.array(timestep),
-            )
+            ]
+            if "text_embeds" in example:
+                arguments.append(mx.array(example["text_embeds"]))
+                arguments.append(mx.array(example["time_ids"]))
+            if getattr(model, "gradient_checkpointing", False):
+                loss, grads = model.segmented_loss(*arguments[1:])
+            else:
+                loss, grads = loss_and_grad(*arguments)
             mx.eval(loss, grads)
             micro_losses.append(loss)
             accumulated = grads if accumulated is None else tree_map(lambda left, right: left + right, accumulated, grads)
@@ -128,14 +153,18 @@ def load_checkpoint(model: nn.Module, optimizer: optim.Optimizer, path: Path) ->
 
 def fixed_batch_loss(model: nn.Module, example: dict[str, np.ndarray], alphas_cumprod: mx.array, step: int) -> float:
     timestep, noise = _batch_noise(example, step, int(alphas_cumprod.shape[0]))
-    loss = prediction_loss(
+    arguments = [
         model,
         mx.array(example["latent"]),
         mx.array(example["embedding"]),
         mx.array(noise),
         alphas_cumprod[timestep],
         mx.array(timestep),
-    )
+    ]
+    if "text_embeds" in example:
+        arguments.append(mx.array(example["text_embeds"]))
+        arguments.append(mx.array(example["time_ids"]))
+    loss = prediction_loss(*arguments)
     mx.eval(loss)
     return float(loss.item())
 

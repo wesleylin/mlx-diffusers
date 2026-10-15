@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import mlx.core as mx
 import mlx.nn as nn
+from mlx.utils import tree_flatten, tree_unflatten
 
 from mlx_diffusers.layers import Conv2d, phase2_to_parameter
 from mlx_diffusers.layers.embeddings import TimestepEmbedding, Timesteps
@@ -24,6 +25,19 @@ def _as_list(value, count: int):
     if isinstance(value, (list, tuple)):
         return list(value)
     return [value] * count
+
+
+def _segment(enabled: bool, module, *args):
+    """Run one block, checkpointing it when training so the backward graph stays small."""
+    if not enabled:
+        return module(*args)
+
+    def run(*inner):
+        return module(*inner)
+
+    output = mx.checkpoint(run)(*args)
+    mx.eval(output)
+    return output
 
 
 class LinearTransformer2D(nn.Module):
@@ -54,6 +68,7 @@ class LinearTransformer2D(nn.Module):
             for _ in range(num_layers)
         ]
         self.proj_out = nn.Linear(inner, in_channels)
+        self.gradient_checkpointing = False
 
     def __call__(self, hidden_states: mx.array, encoder_hidden_states: mx.array | None = None) -> mx.array:
         residual = hidden_states
@@ -63,7 +78,13 @@ class LinearTransformer2D(nn.Module):
         hidden_states = mx.transpose(hidden_states, (0, 2, 3, 1)).reshape(batch, height * width, inner)
         hidden_states = self.proj_in(hidden_states)
         for block in self.transformer_blocks:
-            hidden_states = block(hidden_states, encoder_hidden_states=encoder_hidden_states)
+            if self.gradient_checkpointing:
+                def run(states, context, layer=block):
+                    return layer(states, encoder_hidden_states=context)
+
+                hidden_states = mx.checkpoint(run)(hidden_states, encoder_hidden_states)
+            else:
+                hidden_states = block(hidden_states, encoder_hidden_states=encoder_hidden_states)
             # Materialize each block so a 10-layer SDXL transformer does not
             # keep the whole graph live on a 16GB machine.
             mx.eval(hidden_states)
@@ -122,15 +143,16 @@ class CrossAttnDownBlockXL(nn.Module):
             self.downsamplers = [
                 Downsample2D(out_channels, use_conv=True, out_channels=out_channels, padding=downsample_padding, name="op")
             ]
+        self.gradient_checkpointing = False
 
     def __call__(self, hidden_states, temb, encoder_hidden_states):
         states = []
         for resnet, attn in zip(self.resnets, self.attentions):
-            hidden_states = resnet(hidden_states, temb)
+            hidden_states = _segment(self.gradient_checkpointing, resnet, hidden_states, temb)
             hidden_states = attn(hidden_states, encoder_hidden_states=encoder_hidden_states)
             states.append(hidden_states)
         if self.downsamplers is not None:
-            hidden_states = self.downsamplers[0](hidden_states)
+            hidden_states = _segment(self.gradient_checkpointing, self.downsamplers[0], hidden_states)
             states.append(hidden_states)
         return hidden_states, states
 
@@ -171,15 +193,16 @@ class CrossAttnUpBlockXL(nn.Module):
         self.resnets = resnets
         self.attentions = attentions
         self.upsamplers = [Upsample2D(out_channels, use_conv=True, out_channels=out_channels)] if add_upsample else None
+        self.gradient_checkpointing = False
 
     def __call__(self, hidden_states, res_hidden_states, temb, encoder_hidden_states):
         for resnet, attn in zip(self.resnets, self.attentions):
             skip = res_hidden_states.pop()
             hidden_states = mx.concatenate([hidden_states, skip], axis=1)
-            hidden_states = resnet(hidden_states, temb)
+            hidden_states = _segment(self.gradient_checkpointing, resnet, hidden_states, temb)
             hidden_states = attn(hidden_states, encoder_hidden_states=encoder_hidden_states)
         if self.upsamplers is not None:
-            hidden_states = self.upsamplers[0](hidden_states)
+            hidden_states = _segment(self.gradient_checkpointing, self.upsamplers[0], hidden_states)
         return hidden_states
 
 
@@ -210,11 +233,51 @@ class UNetMidBlockXL(nn.Module):
                 eps,
             )
         ]
+        self.gradient_checkpointing = False
 
     def __call__(self, hidden_states, temb, encoder_hidden_states):
-        hidden_states = self.resnets[0](hidden_states, temb)
+        hidden_states = _segment(self.gradient_checkpointing, self.resnets[0], hidden_states, temb)
         hidden_states = self.attentions[0](hidden_states, encoder_hidden_states=encoder_hidden_states)
-        hidden_states = self.resnets[1](hidden_states, temb)
+        hidden_states = _segment(self.gradient_checkpointing, self.resnets[1], hidden_states, temb)
+        return hidden_states
+
+
+class DownBlockXL(DownBlock2D):
+    """SD1.5 down block with an optional per-resnet checkpoint."""
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.gradient_checkpointing = False
+
+    def __call__(self, hidden_states, temb):
+        if not self.gradient_checkpointing:
+            return super().__call__(hidden_states, temb)
+        states = []
+        for resnet in self.resnets:
+            hidden_states = _segment(True, resnet, hidden_states, temb)
+            states.append(hidden_states)
+        if self.downsamplers is not None:
+            hidden_states = _segment(True, self.downsamplers[0], hidden_states)
+            states.append(hidden_states)
+        return hidden_states, states
+
+
+class UpBlockXL(UpBlock2D):
+    """SD1.5 up block with an optional per-resnet checkpoint."""
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.gradient_checkpointing = False
+
+    def __call__(self, hidden_states, res_hidden_states, temb):
+        if not self.gradient_checkpointing:
+            return super().__call__(hidden_states, res_hidden_states, temb)
+        for resnet in self.resnets:
+            skip = res_hidden_states.pop()
+            hidden_states = mx.concatenate([hidden_states, skip], axis=1)
+            hidden_states = _segment(True, resnet, hidden_states, temb)
+        if self.upsamplers is not None:
+            hidden_states = _segment(True, self.upsamplers[0], hidden_states)
         return hidden_states
 
 
@@ -268,7 +331,7 @@ class UNet2DConditionXL(nn.Module):
                     padding,
                 )
             elif kind == "DownBlock2D":
-                block = DownBlock2D(
+                block = DownBlockXL(
                     in_channels,
                     out_channels,
                     time_dim,
@@ -309,7 +372,7 @@ class UNet2DConditionXL(nn.Module):
             num_layers = reversed_layers[index] + 1
             add_upsample = index != len(reversed_channels) - 1
             if kind == "UpBlock2D":
-                block = UpBlock2D(
+                block = UpBlockXL(
                     skip_channels,
                     prev_output,
                     output_channel,
@@ -347,6 +410,10 @@ class UNet2DConditionXL(nn.Module):
         self.load_weights(pairs, strict=True)
         self.eval()
 
+    def enable_gradient_checkpointing(self) -> None:
+        """Train with ``segmented_loss`` so the backward graph is one block."""
+        self.gradient_checkpointing = True
+
     def __call__(
         self,
         sample: mx.array,
@@ -360,11 +427,16 @@ class UNet2DConditionXL(nn.Module):
             timestep = mx.full((sample.shape[0],), timestep)
         elif timestep.shape[0] != sample.shape[0]:
             timestep = mx.broadcast_to(timestep, (sample.shape[0],))
-        emb = self.time_embedding(self.time_proj(timestep))
-        text_embeds = added_cond_kwargs["text_embeds"]
+        # Match the checkpoint dtype. fp32 inputs against an fp16 UNet would upcast
+        # every activation and blow the backward graph.
+        compute = self.conv_in.weight.dtype
+        sample = sample.astype(compute)
+        encoder_hidden_states = encoder_hidden_states.astype(compute)
+        emb = self.time_embedding(self.time_proj(timestep)).astype(compute)
+        text_embeds = added_cond_kwargs["text_embeds"].astype(compute)
         time_ids = added_cond_kwargs["time_ids"]
         time_embeds = self.add_time_proj(time_ids.reshape((-1,))).reshape((text_embeds.shape[0], -1))
-        aug = self.add_embedding(mx.concatenate([text_embeds, time_embeds], axis=-1))
+        aug = self.add_embedding(mx.concatenate([text_embeds, time_embeds.astype(compute)], axis=-1))
         emb = emb + aug
         sample = self.conv_in(sample)
         residuals = [sample]
@@ -385,3 +457,171 @@ class UNet2DConditionXL(nn.Module):
                 sample = block(sample, skips, emb)
         sample = nn.silu(self.conv_norm_out(sample))
         return self.conv_out(sample)
+
+    def segmented_loss(self, latent, embedding, noise, alpha, timestep, text_embeds, time_ids):
+        """Backward one block at a time.
+
+        ``mx.checkpoint`` still builds the full backward graph on eval, so a
+        768 SDXL step peaked near 21GB. Saving block inputs and differentiating
+        each block on its own keeps the live graph to one transformer.
+        """
+        noisy = mx.sqrt(alpha) * latent + mx.sqrt(1.0 - alpha) * noise
+        prediction, tape, prefixes = self._forward_tape(noisy, timestep, embedding, text_embeds, time_ids)
+        diff = prediction.astype(mx.float32) - noise.astype(mx.float32)
+        loss = mx.mean(diff * diff)
+        cotan = mx.stop_gradient((2.0 * diff / diff.size).astype(prediction.dtype))
+        mx.eval(loss, cotan)
+        grads = self._backward_tape(tape, prefixes, prediction, cotan)
+        mx.eval(loss, grads)
+        return loss, grads
+
+    def _forward_tape(self, sample, timestep, encoder_hidden_states, text_embeds, time_ids):
+        if not isinstance(timestep, mx.array):
+            timestep = mx.array(timestep)
+        if timestep.ndim == 0:
+            timestep = mx.full((sample.shape[0],), timestep)
+        elif timestep.shape[0] != sample.shape[0]:
+            timestep = mx.broadcast_to(timestep, (sample.shape[0],))
+        compute = self.conv_in.weight.dtype
+        sample = _keep(sample.astype(compute))
+        context = _keep(encoder_hidden_states.astype(compute))
+        emb = self.time_embedding(self.time_proj(timestep)).astype(compute)
+        text_embeds = text_embeds.astype(compute)
+        time_embeds = self.add_time_proj(time_ids.reshape((-1,))).reshape((text_embeds.shape[0], -1))
+        aug = self.add_embedding(mx.concatenate([text_embeds, time_embeds.astype(compute)], axis=-1))
+        emb = _keep(emb + aug)
+        tape = []
+        hidden = self._record(tape, self.conv_in, sample)
+        residuals = [hidden]
+        for block in self.down_blocks:
+            hidden, states = self._down_tape(tape, block, hidden, emb, context)
+            residuals.extend(states)
+        hidden = self._mid_tape(tape, hidden, emb, context)
+        for block in self.up_blocks:
+            count = len(block.resnets)
+            skips = residuals[-count:]
+            del residuals[-count:]
+            hidden = self._up_tape(tape, block, hidden, skips, emb, context)
+        hidden = self._record(tape, lambda h: nn.silu(self.conv_norm_out(h)), hidden)
+        hidden = self._record(tape, self.conv_out, hidden)
+        prefixes = {id(module): name for name, module in self.named_modules()}
+        return hidden, tape, prefixes
+
+    def _down_tape(self, tape, block, hidden, emb, context):
+        states = []
+        if isinstance(block, CrossAttnDownBlockXL):
+            for resnet, attn in zip(block.resnets, block.attentions):
+                hidden = self._record(tape, lambda h, layer=resnet: layer(h, emb), hidden, module=resnet)
+                hidden = self._record(
+                    tape,
+                    lambda h, layer=attn: layer(h, encoder_hidden_states=context),
+                    hidden,
+                    module=attn,
+                )
+                states.append(hidden)
+        else:
+            for resnet in block.resnets:
+                hidden = self._record(tape, lambda h, layer=resnet: layer(h, emb), hidden, module=resnet)
+                states.append(hidden)
+        if block.downsamplers is not None:
+            hidden = self._record(tape, block.downsamplers[0], hidden)
+            states.append(hidden)
+        return hidden, states
+
+    def _mid_tape(self, tape, hidden, emb, context):
+        block = self.mid_block
+        hidden = self._record(tape, lambda h, layer=block.resnets[0]: layer(h, emb), hidden, module=block.resnets[0])
+        hidden = self._record(
+            tape,
+            lambda h, layer=block.attentions[0]: layer(h, encoder_hidden_states=context),
+            hidden,
+            module=block.attentions[0],
+        )
+        hidden = self._record(tape, lambda h, layer=block.resnets[1]: layer(h, emb), hidden, module=block.resnets[1])
+        return hidden
+
+    def _up_tape(self, tape, block, hidden, skips, emb, context):
+        attentions = block.attentions if isinstance(block, CrossAttnUpBlockXL) else [None] * len(block.resnets)
+        for resnet, attn in zip(block.resnets, attentions):
+            skip = skips.pop()
+            channels = hidden.shape[1]
+            joined = _keep(mx.concatenate([hidden, skip], axis=1))
+            tape.append(("concat", hidden, skip, joined, channels))
+            hidden = self._record(tape, lambda h, layer=resnet: layer(h, emb), joined, module=resnet)
+            if attn is not None:
+                hidden = self._record(
+                    tape,
+                    lambda h, layer=attn: layer(h, encoder_hidden_states=context),
+                    hidden,
+                    module=attn,
+                )
+        if block.upsamplers is not None:
+            hidden = self._record(tape, block.upsamplers[0], hidden)
+        return hidden
+
+    def _record(self, tape, fn, *inputs, module=None):
+        output = _keep(fn(*inputs))
+        if module is None and isinstance(fn, nn.Module):
+            module = fn
+        tape.append(("call", fn, inputs, output, module))
+        return output
+
+    def _backward_tape(self, tape, prefixes, prediction, cotan):
+        acc = {key: mx.zeros_like(value) for key, value in tree_flatten(self.trainable_parameters())}
+        pending = {id(prediction): cotan}
+        for entry in reversed(tape):
+            if entry[0] == "concat":
+                _, left, right, output, channels = entry
+                grad = pending.pop(id(output))
+                _add_pending(pending, left, grad[:, :channels])
+                _add_pending(pending, right, grad[:, channels:])
+                continue
+            _, fn, inputs, output, module = entry
+            grad = pending.pop(id(output))
+            input_grads, param_grads = _vjp(fn, grad, inputs, module)
+            for tensor, tensor_grad in zip(inputs, input_grads):
+                _add_pending(pending, tensor, tensor_grad)
+            if param_grads is None:
+                continue
+            prefix = prefixes[id(module)]
+            for key, value in tree_flatten(param_grads):
+                full = f"{prefix}.{key}" if prefix else key
+                if full not in acc:
+                    raise KeyError(full)
+                acc[full] = acc[full] + value
+        mx.eval(*acc.values())
+        mx.clear_cache()
+        return tree_unflatten(list(acc.items()))
+
+
+def _keep(value: mx.array) -> mx.array:
+    value = mx.stop_gradient(value)
+    mx.eval(value)
+    return value
+
+
+def _add_pending(pending: dict, tensor: mx.array, grad: mx.array) -> None:
+    grad = mx.stop_gradient(grad)
+    mx.eval(grad)
+    current = pending.get(id(tensor))
+    pending[id(tensor)] = grad if current is None else current + grad
+
+
+def _vjp(fn, cotan, inputs, module):
+    cotan = mx.stop_gradient(cotan)
+
+    def scalar(*args):
+        return mx.sum(fn(*args) * cotan)
+
+    if len(inputs) == 1:
+        input_grads = (mx.grad(scalar)(*inputs),)
+    else:
+        input_grads = mx.grad(scalar, argnums=tuple(range(len(inputs))))(*inputs)
+    param_grads = None
+    if module is not None and tree_flatten(module.trainable_parameters()):
+        _, param_grads = nn.value_and_grad(module, scalar)(*inputs)
+    mx.eval(*input_grads)
+    if param_grads is not None:
+        mx.eval(param_grads)
+    mx.clear_cache()
+    return input_grads, param_grads

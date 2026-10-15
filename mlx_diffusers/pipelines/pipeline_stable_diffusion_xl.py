@@ -50,6 +50,7 @@ class StableDiffusionXLPipeline:
         self.sample_size = sample_size
         self.vae_scale_factor = vae_scale_factor
         self.force_zeros_for_empty_prompt = force_zeros_for_empty_prompt
+        self.model_dir: Path | None = None
 
     @classmethod
     def from_pretrained(cls, model_dir: str | Path, index: dict | None = None) -> "StableDiffusionXLPipeline":
@@ -68,7 +69,7 @@ class StableDiffusionXLPipeline:
         with (model_dir / "scheduler" / "scheduler_config.json").open() as handle:
             scheduler_config = json.load(handle)
         vae_blocks = vae_result.config["block_out_channels"]
-        return cls(
+        pipeline = cls(
             tokenizer,
             tokenizer_2,
             text_encoder,
@@ -82,6 +83,16 @@ class StableDiffusionXLPipeline:
             2 ** (len(vae_blocks) - 1),
             bool(index.get("force_zeros_for_empty_prompt", True)),
         )
+        pipeline.model_dir = model_dir
+        return pipeline
+
+    def _ensure_text_encoders(self) -> None:
+        if self.text_encoder is not None and self.text_encoder_2 is not None:
+            return
+        if self.model_dir is None:
+            raise RuntimeError("text encoders were released and no model directory is stored")
+        self.text_encoder = load_model(self.model_dir / "text_encoder").module
+        self.text_encoder_2 = load_model(self.model_dir / "text_encoder_2").module
 
     def _tokenize(self, tokenizer, prompt: str) -> mx.array:
         tokens = tokenizer(
@@ -94,6 +105,7 @@ class StableDiffusionXLPipeline:
         return mx.array(np.asarray(tokens["input_ids"], dtype=np.int32))
 
     def encode_prompt(self, prompt: str) -> tuple[mx.array, mx.array]:
+        self._ensure_text_encoders()
         hidden_1 = self.text_encoder.penultimate(self._tokenize(self.tokenizer, prompt))
         hidden_2, pooled = self.text_encoder_2.penultimate_and_pooled(self._tokenize(self.tokenizer_2, prompt))
         hidden = mx.concatenate([hidden_1, hidden_2], axis=-1)

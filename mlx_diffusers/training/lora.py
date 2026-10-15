@@ -34,12 +34,14 @@ class LoRALinear(nn.Module):
 
     def __call__(self, x: mx.array) -> mx.array:
         base = self.linear(x)
-        update = (x @ self.lora_a) @ self.lora_b
+        # LoRA stays float32 so an fp16 base checkpoint does not overflow the update.
+        residual = x.astype(self.lora_a.dtype)
+        update = (residual @ self.lora_a) @ self.lora_b
         return base + (self.scale * update).astype(x.dtype)
 
 
-def _is_target(name: str) -> bool:
-    return any(name == target or name.endswith("." + target) for target in LORA_TARGETS)
+def _is_target(name: str, targets: tuple[str, ...]) -> bool:
+    return any(name == target or name.endswith("." + target) for target in targets)
 
 
 def _set_module(root: nn.Module, path: str, value: nn.Module) -> None:
@@ -54,9 +56,13 @@ def _set_module(root: nn.Module, path: str, value: nn.Module) -> None:
         setattr(parent, last, value)
 
 
-def inject(model: nn.Module, rank: int, alpha: float) -> list[str]:
+def inject(model: nn.Module, rank: int, alpha: float, targets: tuple[str, ...] = LORA_TARGETS) -> list[str]:
     """Replace attention projections with LoRA and freeze everything else."""
-    names = [name for name, module in model.named_modules() if name and _is_target(name) and isinstance(module, nn.Linear)]
+    names = [
+        name
+        for name, module in model.named_modules()
+        if name and _is_target(name, targets) and isinstance(module, nn.Linear)
+    ]
     for name in names:
         current = model
         for part in name.split("."):
@@ -77,6 +83,59 @@ def lora_arrays(model: nn.Module) -> dict[str, np.ndarray]:
             mx.eval(value)
             arrays[key] = np.array(value)
     return arrays
+
+
+_KOHYA_PREFIX = {"unet": "lora_unet_", "te": "lora_te_", "te2": "lora_te2_"}
+
+
+def _kohya_stem(component: str, module_name: str) -> str:
+    return _KOHYA_PREFIX[component] + module_name.replace(".", "_")
+
+
+def save_kohya(models: dict[str, nn.Module], path: str | Path, alpha: float) -> None:
+    """Kohya keys: ``lora_unet_`` / ``lora_te_`` / ``lora_te2_`` plus ``.alpha``."""
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    arrays: dict[str, np.ndarray] = {}
+    for component, model in models.items():
+        if component not in _KOHYA_PREFIX:
+            raise KeyError(component)
+        for key, value in lora_arrays(model).items():
+            if key.endswith(".lora_a"):
+                module_name = key[: -len(".lora_a")]
+                stem = _kohya_stem(component, module_name)
+                arrays[stem + ".lora_down.weight"] = np.ascontiguousarray(np.transpose(value))
+                arrays[stem + ".alpha"] = np.array(alpha, dtype=np.float32)
+            elif key.endswith(".lora_b"):
+                module_name = key[: -len(".lora_b")]
+                stem = _kohya_stem(component, module_name)
+                arrays[stem + ".lora_up.weight"] = np.ascontiguousarray(np.transpose(value))
+    save_file(arrays, path)
+
+
+def load_kohya(models: dict[str, nn.Module], path: str | Path) -> None:
+    from safetensors import safe_open
+
+    with safe_open(path, framework="numpy") as handle:
+        keys = set(handle.keys())
+        for component, model in models.items():
+            pairs = []
+            for name, module in model.named_modules():
+                if not isinstance(module, LoRALinear):
+                    continue
+                stem = _kohya_stem(component, name)
+                down_key = stem + ".lora_down.weight"
+                up_key = stem + ".lora_up.weight"
+                alpha_key = stem + ".alpha"
+                if down_key not in keys or up_key not in keys or alpha_key not in keys:
+                    raise KeyError(f"missing kohya entries for {stem}")
+                down = handle.get_tensor(down_key)
+                up = handle.get_tensor(up_key)
+                pairs.append((name + ".lora_a", mx.array(np.ascontiguousarray(np.transpose(down)))))
+                pairs.append((name + ".lora_b", mx.array(np.ascontiguousarray(np.transpose(up)))))
+            if pairs:
+                model.load_weights(pairs, strict=False)
+                mx.eval(model.parameters())
 
 
 def save_lora(model: nn.Module, path: str | Path, rank: int, alpha: float) -> None:
