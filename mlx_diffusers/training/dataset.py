@@ -29,6 +29,22 @@ def _image_tensor(path: Path) -> mx.array:
     return mx.array(np.transpose(array, (2, 0, 1))[None])
 
 
+def progressive_step_counts(steps: int, low_size: int = 512, high_size: int = 768) -> tuple[int, int]:
+    """Most steps at ``low_size``, then the rest at ``high_size``.
+
+    1024 is not a training resolution on this machine. A 10-step run is 8
+    steps at 512 and 2 steps at 768.
+    """
+    if low_size >= 1024 or high_size >= 1024:
+        raise ValueError(f"refusing resolution {low_size}/{high_size}; 1024 is not trained here")
+    if low_size >= high_size:
+        raise ValueError(f"low resolution {low_size} must be below high resolution {high_size}")
+    if steps < 2:
+        raise ValueError(f"progressive training needs at least 2 steps, got {steps}")
+    high = max(1, steps // 5)
+    return steps - high, high
+
+
 def area_buckets(target_size: int = 1024, alignment: int = 64, max_aspect: float = 2.0) -> list[tuple[int, int]]:
     """Height, width pairs near ``target_size ** 2``, multiples of ``alignment``."""
     if alignment <= 0 or target_size < alignment:
