@@ -14,6 +14,7 @@ import importlib.util
 import json
 import math
 import shutil
+import time
 from pathlib import Path
 
 import mlx.core as mx
@@ -150,16 +151,28 @@ def _run_stability(args) -> None:
     examples = load_cache(cache_dir)
     gc.collect()
     mx.clear_cache()
+    fixed_before = fixed_batch_loss(unet, examples[0], alphas, step=10_000)
+    print(f"fixed_batch_before {fixed_before:.6f}", flush=True)
+    mx.clear_cache()
     mx.reset_peak_memory()
     losses: list[float] = []
     peaks: list[float] = []
+    seconds: list[float] = []
     stopped: str | None = None
+    clock = time.perf_counter()
 
     def _log(step, loss):
-        nonlocal stopped
+        nonlocal stopped, clock
+        now = time.perf_counter()
+        elapsed = now - clock
+        clock = now
         peak = mx.get_peak_memory() / (1024 ** 3)
         active = mx.get_active_memory() / (1024 ** 3)
-        print(f"step {step} loss {loss:.6f} peak_gb {peak:.2f} active_gb {active:.2f}", flush=True)
+        print(
+            f"step {step} loss {loss:.6f} peak_gb {peak:.2f} active_gb {active:.2f} seconds {elapsed:.2f}",
+            flush=True,
+        )
+        seconds.append(elapsed)
         losses.append(loss)
         peaks.append(peak)
         if not math.isfinite(loss):
@@ -187,10 +200,25 @@ def _run_stability(args) -> None:
     except SystemExit:
         write_loss_log(STABILITY_LOG, _stability_record(losses, peaks, stopped=stopped))
         raise
+    fixed_after = fixed_batch_loss(unet, examples[0], alphas, step=10_000)
     record = _stability_record(losses, peaks, stopped=None)
+    record["fixed_before"] = fixed_before
+    record["fixed_after"] = fixed_after
+    record["seconds_per_step"] = sum(seconds) / len(seconds) if seconds else None
     write_loss_log(STABILITY_LOG, record)
     print(
-        json.dumps({key: record[key] for key in ("steps_completed", "first", "last", "max_peak_gb", "finite")}),
+        json.dumps(
+            {
+                "steps_completed": record["steps_completed"],
+                "first": record["first"],
+                "last": record["last"],
+                "max_peak_gb": record["max_peak_gb"],
+                "finite": record["finite"],
+                "fixed_before": fixed_before,
+                "fixed_after": fixed_after,
+                "seconds_per_step": record["seconds_per_step"],
+            }
+        ),
         flush=True,
     )
 

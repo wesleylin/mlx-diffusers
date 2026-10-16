@@ -613,15 +613,24 @@ def _vjp(fn, cotan, inputs, module):
     def scalar(*args):
         return mx.sum(fn(*args) * cotan)
 
-    if len(inputs) == 1:
-        input_grads = (mx.grad(scalar)(*inputs),)
-    else:
-        input_grads = mx.grad(scalar, argnums=tuple(range(len(inputs))))(*inputs)
-    param_grads = None
-    if module is not None and tree_flatten(module.trainable_parameters()):
-        _, param_grads = nn.value_and_grad(module, scalar)(*inputs)
-    mx.eval(*input_grads)
-    if param_grads is not None:
-        mx.eval(param_grads)
-    mx.clear_cache()
+    trainable = module is not None and bool(tree_flatten(module.trainable_parameters()))
+    if not trainable:
+        if len(inputs) == 1:
+            input_grads = (mx.grad(scalar)(*inputs),)
+        else:
+            input_grads = mx.grad(scalar, argnums=tuple(range(len(inputs))))(*inputs)
+        mx.eval(*input_grads)
+        return input_grads, None
+
+    def inner(param_tree, *args):
+        module.update(param_tree)
+        return scalar(*args)
+
+    _, grads = mx.value_and_grad(inner, argnums=tuple(range(1 + len(inputs))))(
+        module.trainable_parameters(),
+        *inputs,
+    )
+    param_grads = grads[0]
+    input_grads = grads[1:]
+    mx.eval(param_grads, *input_grads)
     return input_grads, param_grads

@@ -14,3 +14,4 @@ tests/goldens/sdxl/module_inputs/
 tests/goldens/sdxl/overfit/cache/
 tests/goldens/sdxl/overfit/checkpoint.npz
 tests/goldens/sdxl/overfit/*.safetensors
+tests/goldens/sdxl/overfit/stability.json
