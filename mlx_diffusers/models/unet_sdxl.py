@@ -463,7 +463,8 @@ class UNet2DConditionXL(nn.Module):
 
         ``mx.checkpoint`` still builds the full backward graph on eval, so a
         768 SDXL step peaked near 21GB. Saving block inputs and differentiating
-        each block on its own keeps the live graph to one transformer.
+        each block on its own keeps the live graph to one resnet or one
+        attention sublayer. The transformer is not one checkpoint.
         """
         noisy = mx.sqrt(alpha) * latent + mx.sqrt(1.0 - alpha) * noise
         prediction, tape, prefixes = self._forward_tape(noisy, timestep, embedding, text_embeds, time_ids)
@@ -512,12 +513,7 @@ class UNet2DConditionXL(nn.Module):
         if isinstance(block, CrossAttnDownBlockXL):
             for resnet, attn in zip(block.resnets, block.attentions):
                 hidden = self._record(tape, lambda h, layer=resnet: layer(h, emb), hidden, module=resnet)
-                hidden = self._record(
-                    tape,
-                    lambda h, layer=attn: layer(h, encoder_hidden_states=context),
-                    hidden,
-                    module=attn,
-                )
+                hidden = self._attention_tape(tape, attn, hidden, context)
                 states.append(hidden)
         else:
             for resnet in block.resnets:
@@ -531,12 +527,7 @@ class UNet2DConditionXL(nn.Module):
     def _mid_tape(self, tape, hidden, emb, context):
         block = self.mid_block
         hidden = self._record(tape, lambda h, layer=block.resnets[0]: layer(h, emb), hidden, module=block.resnets[0])
-        hidden = self._record(
-            tape,
-            lambda h, layer=block.attentions[0]: layer(h, encoder_hidden_states=context),
-            hidden,
-            module=block.attentions[0],
-        )
+        hidden = self._attention_tape(tape, block.attentions[0], hidden, context)
         hidden = self._record(tape, lambda h, layer=block.resnets[1]: layer(h, emb), hidden, module=block.resnets[1])
         return hidden
 
@@ -549,15 +540,49 @@ class UNet2DConditionXL(nn.Module):
             tape.append(("concat", hidden, skip, joined, channels))
             hidden = self._record(tape, lambda h, layer=resnet: layer(h, emb), joined, module=resnet)
             if attn is not None:
-                hidden = self._record(
-                    tape,
-                    lambda h, layer=attn: layer(h, encoder_hidden_states=context),
-                    hidden,
-                    module=attn,
-                )
+                hidden = self._attention_tape(tape, attn, hidden, context)
         if block.upsamplers is not None:
             hidden = self._record(tape, block.upsamplers[0], hidden)
         return hidden
+
+    def _attention_tape(self, tape, attn, hidden, context):
+        """One VJP per self-attention, cross-attention, and feed-forward.
+
+        ``mlx-mfa`` is not installed. Scores stay on
+        ``mx.fast.scaled_dot_product_attention``. Cutting the tape here keeps
+        a 10-layer block from building a single backward graph. Query tiling
+        inside one ``value_and_grad`` would not drop the peak.
+        """
+        batch, _, height, width = hidden.shape
+
+        def project_in(states, layer=attn):
+            states = layer.norm(states)
+            inner = states.shape[1]
+            states = mx.transpose(states, (0, 2, 3, 1)).reshape(batch, height * width, inner)
+            return layer.proj_in(states)
+
+        tokens = self._record(tape, project_in, hidden)
+        for block in attn.transformer_blocks:
+            def self_attn(states, layer=block):
+                return layer.attn1(layer.norm1(states)) + states
+
+            def cross_attn(states, layer=block):
+                return layer.attn2(layer.norm2(states), encoder_hidden_states=context) + states
+
+            def feed_forward(states, layer=block):
+                return layer.ff(layer.norm3(states)) + states
+
+            tokens = self._record(tape, self_attn, tokens, module=block.attn1)
+            tokens = self._record(tape, cross_attn, tokens, module=block.attn2)
+            tokens = self._record(tape, feed_forward, tokens, module=block.ff)
+
+        def project_out(states, residual, layer=attn):
+            inner = states.shape[-1]
+            states = layer.proj_out(states)
+            states = mx.transpose(states.reshape(batch, height, width, inner), (0, 3, 1, 2))
+            return states + residual
+
+        return self._record(tape, project_out, tokens, hidden)
 
     def _record(self, tape, fn, *inputs, module=None):
         output = _keep(fn(*inputs))
