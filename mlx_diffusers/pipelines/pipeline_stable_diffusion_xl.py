@@ -86,6 +86,15 @@ class StableDiffusionXLPipeline:
         pipeline.model_dir = model_dir
         return pipeline
 
+    def release_for_training(self) -> None:
+        """Drop the VAE and both text encoders after their caches exist."""
+        self.text_encoder = None
+        self.text_encoder_2 = None
+        self.vae = None
+
+    def conditioning_resident(self) -> list[str]:
+        return [name for name in ("text_encoder", "text_encoder_2", "vae") if getattr(self, name, None) is not None]
+
     def _ensure_text_encoders(self) -> None:
         if self.text_encoder is not None and self.text_encoder_2 is not None:
             return
