@@ -8,7 +8,13 @@ import numpy as np
 from PIL import Image
 
 from mlx_diffusers.pipelines.pipeline_stable_diffusion_xl import StableDiffusionXLPipeline
-from mlx_diffusers.training.dataset import area_buckets, cache_examples, choose_bucket, progressive_step_counts
+from mlx_diffusers.training.dataset import (
+    area_buckets,
+    cache_examples,
+    choose_bucket,
+    parse_resolutions,
+    stage_step_counts,
+)
 from mlx_diffusers.training.lora import inject, load_kohya, lora_arrays, save_kohya
 from mlx_diffusers.training.trainer import fixed_batch_loss, train
 
@@ -135,10 +141,15 @@ def test_trainer_uses_pooled_and_time_ids():
     assert result["losses"]
 
 
-def test_progressive_steps_stay_mostly_at_512_and_skip_1024():
-    assert progressive_step_counts(10, 512, 768) == (8, 2)
+def test_resolution_choices_keep_768_as_the_default():
+    assert parse_resolutions(None) == [768]
+    assert parse_resolutions(["512"]) == [512]
+    assert parse_resolutions(["512,768"]) == [512, 768]
+    assert parse_resolutions(["768", "512"]) == [768, 512]
+    assert stage_step_counts(10, 2) == [5, 5]
+    assert stage_step_counts(10, 1) == [10]
     try:
-        progressive_step_counts(10, 512, 1024)
+        parse_resolutions(["1024"])
     except ValueError as exc:
         assert "1024" in str(exc)
     else:

@@ -29,20 +29,44 @@ def _image_tensor(path: Path) -> mx.array:
     return mx.array(np.transpose(array, (2, 0, 1))[None])
 
 
-def progressive_step_counts(steps: int, low_size: int = 512, high_size: int = 768) -> tuple[int, int]:
-    """Most steps at ``low_size``, then the rest at ``high_size``.
+TRAIN_RESOLUTIONS = (512, 768)
 
-    1024 is not a training resolution on this machine. A 10-step run is 8
-    steps at 512 and 2 steps at 768.
+
+def parse_resolutions(values: list[str] | None) -> list[int]:
+    """Resolution stages in the order given. ``None`` is the 768 default.
+
+    Each entry may be one size or a comma list. 512 and 768 are the choices.
     """
-    if low_size >= 1024 or high_size >= 1024:
-        raise ValueError(f"refusing resolution {low_size}/{high_size}; 1024 is not trained here")
-    if low_size >= high_size:
-        raise ValueError(f"low resolution {low_size} must be below high resolution {high_size}")
-    if steps < 2:
-        raise ValueError(f"progressive training needs at least 2 steps, got {steps}")
-    high = max(1, steps // 5)
-    return steps - high, high
+    if not values:
+        return [768]
+    sizes: list[int] = []
+    for raw in values:
+        for part in raw.split(","):
+            text = part.strip()
+            if not text:
+                continue
+            try:
+                size = int(text)
+            except ValueError as exc:
+                raise ValueError(f"resolution {text!r} is not an integer") from exc
+            if size not in TRAIN_RESOLUTIONS:
+                raise ValueError(f"resolution {size} is not available; choose 512 or 768")
+            sizes.append(size)
+    if not sizes:
+        raise ValueError("resolution list is empty")
+    return sizes
+
+
+def stage_step_counts(steps: int, stages: int) -> list[int]:
+    """Split ``steps`` across stages in order. The last stage gets the remainder."""
+    if stages < 1:
+        raise ValueError("need at least one resolution")
+    if steps < stages:
+        raise ValueError(f"need at least {stages} steps for {stages} resolutions, got {steps}")
+    base, extra = divmod(steps, stages)
+    counts = [base] * stages
+    counts[-1] += extra
+    return counts
 
 
 def area_buckets(target_size: int = 1024, alignment: int = 64, max_aspect: float = 2.0) -> list[tuple[int, int]]:
