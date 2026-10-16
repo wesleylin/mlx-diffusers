@@ -5,9 +5,16 @@ from pathlib import Path
 import mlx.core as mx
 import mlx.nn as nn
 import numpy as np
+from PIL import Image
 
 from mlx_diffusers.pipelines.pipeline_stable_diffusion_xl import StableDiffusionXLPipeline
-from mlx_diffusers.training.dataset import area_buckets, choose_bucket
+from mlx_diffusers.training.dataset import (
+    area_buckets,
+    cache_examples,
+    choose_bucket,
+    parse_resolutions,
+    stage_step_counts,
+)
 from mlx_diffusers.training.lora import inject, load_kohya, lora_arrays, save_kohya
 from mlx_diffusers.training.trainer import fixed_batch_loss, train
 
@@ -132,6 +139,32 @@ def test_trainer_uses_pooled_and_time_ids():
     after = fixed_batch_loss(model, examples[0], alphas, step=3)
     assert np.isfinite(before) and np.isfinite(after)
     assert result["losses"]
+
+
+def test_resolution_choices_keep_768_as_the_default():
+    assert parse_resolutions(None) == [768]
+    assert parse_resolutions(["512"]) == [512]
+    assert parse_resolutions(["512,768"]) == [512, 768]
+    assert parse_resolutions(["768", "512"]) == [768, 512]
+    assert stage_step_counts(10, 2) == [5, 5]
+    assert stage_step_counts(10, 1) == [10]
+    try:
+        parse_resolutions(["1024"])
+    except ValueError as exc:
+        assert "1024" in str(exc)
+    else:
+        raise AssertionError("1024 was accepted")
+
+
+def test_second_resolution_cache_is_not_reencoded(tmp_path: Path):
+    image_dir = tmp_path / "images"
+    image_dir.mkdir()
+    Image.new("RGB", (8, 8), "white").save(image_dir / "a.png")
+    (image_dir / "a.txt").write_text("caption")
+    cache = tmp_path / "cache"
+    cache.mkdir()
+    np.savez(cache / "a.npz", latent=np.zeros((1, 4, 1, 1), dtype=np.float32))
+    cache_examples(object(), image_dir, cache, target_size=512)
 
 
 def test_attention_sublayer_tape_matches_full_backward():

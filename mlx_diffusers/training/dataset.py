@@ -29,6 +29,46 @@ def _image_tensor(path: Path) -> mx.array:
     return mx.array(np.transpose(array, (2, 0, 1))[None])
 
 
+TRAIN_RESOLUTIONS = (512, 768)
+
+
+def parse_resolutions(values: list[str] | None) -> list[int]:
+    """Resolution stages in the order given. ``None`` is the 768 default.
+
+    Each entry may be one size or a comma list. 512 and 768 are the choices.
+    """
+    if not values:
+        return [768]
+    sizes: list[int] = []
+    for raw in values:
+        for part in raw.split(","):
+            text = part.strip()
+            if not text:
+                continue
+            try:
+                size = int(text)
+            except ValueError as exc:
+                raise ValueError(f"resolution {text!r} is not an integer") from exc
+            if size not in TRAIN_RESOLUTIONS:
+                raise ValueError(f"resolution {size} is not available; choose 512 or 768")
+            sizes.append(size)
+    if not sizes:
+        raise ValueError("resolution list is empty")
+    return sizes
+
+
+def stage_step_counts(steps: int, stages: int) -> list[int]:
+    """Split ``steps`` across stages in order. The last stage gets the remainder."""
+    if stages < 1:
+        raise ValueError("need at least one resolution")
+    if steps < stages:
+        raise ValueError(f"need at least {stages} steps for {stages} resolutions, got {steps}")
+    base, extra = divmod(steps, stages)
+    counts = [base] * stages
+    counts[-1] += extra
+    return counts
+
+
 def area_buckets(target_size: int = 1024, alignment: int = 64, max_aspect: float = 2.0) -> list[tuple[int, int]]:
     """Height, width pairs near ``target_size ** 2``, multiples of ``alignment``."""
     if alignment <= 0 or target_size < alignment:

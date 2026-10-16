@@ -25,7 +25,7 @@ from PIL import Image
 from mlx_diffusers.configuration import load_model
 from mlx_diffusers.pipelines.pipeline_utils import from_pretrained
 from mlx_diffusers.schedulers.scheduling_euler import EulerDiscreteScheduler
-from mlx_diffusers.training.dataset import cache_examples, list_examples, load_cache
+from mlx_diffusers.training.dataset import cache_examples, list_examples, load_cache, parse_resolutions, stage_step_counts
 from mlx_diffusers.training.lora import inject, load_kohya, lora_arrays, save_kohya, zero_lora_b
 from mlx_diffusers.training.trainer import fixed_batch_loss, load_checkpoint, train, write_loss_log
 
@@ -129,10 +129,138 @@ def _stability_record(losses: list[float], peaks: list[float], *, stopped: str |
     }
 
 
+def _resolution_cache(size: int) -> Path:
+    """Directory for one cached resolution. The original 768 cache stays flat."""
+    nested = OVERFIT / "cache" / str(size)
+    legacy = OVERFIT / "cache"
+    if size == 768 and not any(nested.glob("*.npz")) and any(p.suffix == ".npz" for p in legacy.glob("*")):
+        return legacy
+    return nested
+
+
+def _ensure_resolution_cache(model: str, size: int) -> Path:
+    """Encode a resolution once. A later run reuses the npz files."""
+    if size >= 1024:
+        raise SystemExit(f"refusing to cache {size}; 1024 is not trained here")
+    folder = _resolution_cache(size)
+    if any(folder.glob("*.npz")):
+        print(f"cache {size} reused from {folder}", flush=True)
+        return folder
+    print(f"caching {size} once", flush=True)
+    pipeline = from_pretrained(model)
+    cache_examples(pipeline, DATASET, folder, target_size=size)
+    pipeline.release_for_training()
+    del pipeline
+    gc.collect()
+    mx.clear_cache()
+    return folder
+
+
+def _run_resolution_stages(args, unet, alphas, resolutions: list[int]) -> None:
+    """Train each requested resolution in order. Each distinct size is cached once."""
+    for size in dict.fromkeys(resolutions):
+        _ensure_resolution_cache(args.model, size)
+    counts = stage_step_counts(args.steps, len(resolutions))
+    start = 0
+    phases = []
+    for size, steps in zip(resolutions, counts):
+        phases.append((size, load_cache(_resolution_cache(size)), steps, start))
+        start += steps
+    gc.collect()
+    mx.clear_cache()
+    losses: list[float] = []
+    peaks: list[float] = []
+    seconds: list[float] = []
+    phase_records = []
+    stopped: str | None = None
+    optimizer = None
+    clock = time.perf_counter()
+    resolution = phases[0][0]
+
+    def _log(step, loss):
+        nonlocal stopped, clock
+        now = time.perf_counter()
+        elapsed = now - clock
+        clock = now
+        peak = mx.get_peak_memory() / (1024 ** 3)
+        active = mx.get_active_memory() / (1024 ** 3)
+        print(
+            f"step {step} loss {loss:.6f} peak_gb {peak:.2f} active_gb {active:.2f} "
+            f"seconds {elapsed:.2f} resolution {resolution}",
+            flush=True,
+        )
+        seconds.append(elapsed)
+        losses.append(loss)
+        peaks.append(peak)
+        if not math.isfinite(loss):
+            stopped = f"nan at step {step}"
+        elif peak > 12.0:
+            stopped = f"memory {peak:.2f} GB at step {step}"
+        mx.clear_cache()
+        mx.reset_peak_memory()
+        if stopped is not None:
+            raise SystemExit(stopped)
+
+    try:
+        for size, examples, steps, start in phases:
+            resolution = size
+            fixed_before = fixed_batch_loss(unet, examples[0], alphas, step=10_000)
+            print(f"fixed_batch_{size}_before {fixed_before:.6f}", flush=True)
+            mx.clear_cache()
+            mx.reset_peak_memory()
+            clock = time.perf_counter()
+            mark = len(seconds)
+            result = train(
+                unet,
+                examples,
+                alphas,
+                steps=steps,
+                learning_rate=args.lr,
+                rank=args.rank,
+                alpha=args.alpha,
+                optimizer=optimizer,
+                start_step=start,
+                on_step=_log,
+            )
+            optimizer = result["optimizer"]
+            fixed_after = fixed_batch_loss(unet, examples[0], alphas, step=10_000)
+            print(f"fixed_batch_{size}_after {fixed_after:.6f}", flush=True)
+            phase_seconds = seconds[mark:]
+            phase_peaks = peaks[mark:]
+            phase_records.append(
+                {
+                    "resolution": size,
+                    "steps": steps,
+                    "fixed_before": fixed_before,
+                    "fixed_after": fixed_after,
+                    "max_peak_gb": max(phase_peaks) if phase_peaks else None,
+                    "seconds_per_step": sum(phase_seconds) / len(phase_seconds) if phase_seconds else None,
+                }
+            )
+    except SystemExit:
+        write_loss_log(STABILITY_LOG, _stability_record(losses, peaks, stopped=stopped))
+        raise
+    record = _stability_record(losses, peaks, stopped=None)
+    record["phases"] = phase_records
+    record["seconds_per_step"] = sum(seconds) / len(seconds) if seconds else None
+    record["fixed_before"] = phase_records[0]["fixed_before"]
+    record["fixed_after"] = phase_records[-1]["fixed_after"]
+    write_loss_log(STABILITY_LOG, record)
+    print(json.dumps({key: record[key] for key in record if key not in {"losses", "peak_gb"}}), flush=True)
+
+
+def _requested_resolutions(args) -> list[int]:
+    try:
+        return parse_resolutions(args.resolution)
+    except ValueError as exc:
+        raise SystemExit(str(exc)) from exc
+
+
 def _run_stability(args) -> None:
     """2000-step finite check on the cached 2-image set. No new images."""
+    resolutions = _requested_resolutions(args)
     cache_dir = OVERFIT / "cache"
-    if not any(cache_dir.glob("*.npz")):
+    if resolutions == [768] and not any(cache_dir.glob("*.npz")):
         raise SystemExit(f"missing cached latents in {cache_dir}")
     mx.set_memory_limit(MEMORY_LIMIT)
     mx.set_cache_limit(512 * 1024 ** 2)
@@ -149,6 +277,9 @@ def _run_stability(args) -> None:
     unet.enable_gradient_checkpointing()
     print(f"injected {len(names)} projections", flush=True)
     print("train holds the unet only", flush=True)
+    if resolutions != [768]:
+        _run_resolution_stages(args, unet, alphas, resolutions)
+        return
     examples = load_cache(cache_dir)
     gc.collect()
     mx.clear_cache()
@@ -233,8 +364,30 @@ def main() -> None:
     parser.add_argument("--lr", type=float, default=1e-4)
     parser.add_argument("--image-steps", type=int, default=8)
     parser.add_argument("--target-size", type=int, default=768)
+    parser.add_argument(
+        "--resolution",
+        action="append",
+        default=None,
+        help=(
+            "Training resolution: 512 or 768. Repeat the flag or pass a comma list "
+            "to run those stages in order. Default is 768, the same training path as before. "
+            "A 10-step measure at 512 was about 2.26 s/step and 5.52 GB. "
+            "On that same run, 768 was about 4.40 s/step and 6.12 GB, "
+            "versus 4.25 s/step and 7.01 GB at 768 on the earlier baseline."
+        ),
+    )
     parser.add_argument("--stability", action="store_true", help="train the cached 2-image set and skip image generation")
     args = parser.parse_args()
+    if args.resolution:
+        try:
+            chosen = parse_resolutions(args.resolution)
+        except ValueError as exc:
+            raise SystemExit(str(exc)) from exc
+        if len(chosen) == 1:
+            args.target_size = chosen[0]
+        else:
+            _run_stability(args)
+            return
     if args.stability:
         _run_stability(args)
         return
@@ -249,7 +402,8 @@ def main() -> None:
     names = inject(pipeline.unet, args.rank, args.alpha)
     pipeline.unet.enable_gradient_checkpointing()
     print(f"injected {len(names)} projections", flush=True)
-    cache_dir = cache_examples(pipeline, DATASET, OVERFIT / "cache", target_size=args.target_size)
+    cache_root = OVERFIT / "cache" if args.target_size == 768 else _resolution_cache(args.target_size)
+    cache_dir = cache_examples(pipeline, DATASET, cache_root, target_size=args.target_size)
     examples = load_cache(cache_dir)
     alphas = pipeline.scheduler.alphas_cumprod
     if not (OVERFIT / "early.png").is_file():
