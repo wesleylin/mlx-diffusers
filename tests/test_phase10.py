@@ -9,7 +9,7 @@ from PIL import Image
 
 from mlx_diffusers.pipelines.pipeline_stable_diffusion_xl import StableDiffusionXLPipeline
 from mlx_diffusers.training.dataset import area_buckets, cache_examples, choose_bucket, progressive_step_counts
-from mlx_diffusers.training.lora import inject, load_kohya, lora_arrays, save_kohya
+from mlx_diffusers.training.lora import inject, load_kohya, lora_arrays, save_kohya, LORA_TARGETS
 from mlx_diffusers.training.trainer import fixed_batch_loss, train
 
 
@@ -154,6 +154,25 @@ def test_second_resolution_cache_is_not_reencoded(tmp_path: Path):
     cache.mkdir()
     np.savez(cache / "a.npz", latent=np.zeros((1, 4, 1, 1), dtype=np.float32))
     cache_examples(object(), image_dir, cache, target_size=512)
+
+
+def test_lora_target_flag_keeps_the_current_default_set():
+    assert LORA_TARGETS == ("to_q", "to_k", "to_v", "to_out.0")
+
+    class Projections(nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.to_q = nn.Linear(4, 4, bias=False)
+            self.to_k = nn.Linear(4, 4, bias=False)
+            self.to_v = nn.Linear(4, 4, bias=False)
+            self.to_out = [nn.Linear(4, 4, bias=False)]
+
+    smaller = Projections()
+    names = inject(smaller, rank=4, alpha=4, targets=("to_q", "to_v"))
+    assert set(names) == {"to_q", "to_v"}
+    assert isinstance(smaller.to_k, nn.Linear)
+    full = Projections()
+    assert set(inject(full, rank=8, alpha=8)) == {"to_q", "to_k", "to_v", "to_out.0"}
 
 
 def test_attention_sublayer_tape_matches_full_backward():

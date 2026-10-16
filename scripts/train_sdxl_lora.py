@@ -26,7 +26,7 @@ from mlx_diffusers.configuration import load_model
 from mlx_diffusers.pipelines.pipeline_utils import from_pretrained
 from mlx_diffusers.schedulers.scheduling_euler import EulerDiscreteScheduler
 from mlx_diffusers.training.dataset import cache_examples, list_examples, load_cache, progressive_step_counts
-from mlx_diffusers.training.lora import inject, load_kohya, lora_arrays, save_kohya, zero_lora_b
+from mlx_diffusers.training.lora import LORA_TARGETS, inject, load_kohya, lora_arrays, save_kohya, zero_lora_b
 from mlx_diffusers.training.trainer import fixed_batch_loss, load_checkpoint, train, write_loss_log
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -245,6 +245,16 @@ def _run_progressive(args, unet, alphas, low_steps: int, high_steps: int) -> Non
     print(json.dumps({key: record[key] for key in record if key not in {"losses", "peak_gb"}}), flush=True)
 
 
+def _lora_targets(raw: str) -> tuple[str, ...]:
+    names = tuple(part.strip() for part in raw.split(",") if part.strip())
+    if not names:
+        raise SystemExit("no LoRA targets")
+    unknown = [name for name in names if name not in LORA_TARGETS]
+    if unknown:
+        raise SystemExit(f"unsupported LoRA targets {unknown}; choices are {', '.join(LORA_TARGETS)}")
+    return names
+
+
 def _run_stability(args) -> None:
     """2000-step finite check on the cached 2-image set. No new images."""
     if args.progressive:
@@ -265,7 +275,7 @@ def _run_stability(args) -> None:
         scheduler_config = json.load(handle)
     alphas = EulerDiscreteScheduler.from_config(scheduler_config).alphas_cumprod
     mx.random.seed(0)
-    names = inject(unet, args.rank, args.alpha)
+    names = inject(unet, args.rank, args.alpha, _lora_targets(args.targets))
     unet.enable_gradient_checkpointing()
     print(f"injected {len(names)} projections", flush=True)
     print("train holds the unet only", flush=True)
@@ -353,6 +363,11 @@ def main() -> None:
     parser.add_argument("--steps", type=int, default=40)
     parser.add_argument("--rank", type=int, default=8)
     parser.add_argument("--alpha", type=float, default=8.0)
+    parser.add_argument(
+        "--targets",
+        default=",".join(LORA_TARGETS),
+        help="comma-separated attention projections; default is to_q,to_k,to_v,to_out.0",
+    )
     parser.add_argument("--lr", type=float, default=1e-4)
     parser.add_argument("--image-steps", type=int, default=8)
     parser.add_argument("--target-size", type=int, default=768)
@@ -371,7 +386,7 @@ def main() -> None:
     pipeline = from_pretrained(args.model)
     print(f"loaded {type(pipeline).__name__} unet {type(pipeline.unet).__name__}", flush=True)
     mx.random.seed(0)
-    names = inject(pipeline.unet, args.rank, args.alpha)
+    names = inject(pipeline.unet, args.rank, args.alpha, _lora_targets(args.targets))
     pipeline.unet.enable_gradient_checkpointing()
     print(f"injected {len(names)} projections", flush=True)
     cache_dir = cache_examples(pipeline, DATASET, OVERFIT / "cache", target_size=args.target_size)
