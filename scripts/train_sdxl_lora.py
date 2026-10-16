@@ -27,6 +27,7 @@ from mlx_diffusers.pipelines.pipeline_utils import from_pretrained
 from mlx_diffusers.schedulers.scheduling_euler import EulerDiscreteScheduler
 from mlx_diffusers.training.dataset import cache_examples, list_examples, load_cache, parse_resolutions, stage_step_counts
 from mlx_diffusers.training.lora import inject, load_kohya, lora_arrays, save_kohya, zero_lora_b
+from mlx_diffusers.training.quantize import quantize_frozen_linears
 from mlx_diffusers.training.trainer import fixed_batch_loss, load_checkpoint, train, write_loss_log
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -274,6 +275,9 @@ def _run_stability(args) -> None:
     alphas = EulerDiscreteScheduler.from_config(scheduler_config).alphas_cumprod
     mx.random.seed(0)
     names = inject(unet, args.rank, args.alpha)
+    if args.quantize_base:
+        quantized = quantize_frozen_linears(unet)
+        print(f"quantized {quantized} frozen linears; convolutions stay fp16", flush=True)
     unet.enable_gradient_checkpointing()
     print(f"injected {len(names)} projections", flush=True)
     print("train holds the unet only", flush=True)
@@ -374,6 +378,15 @@ def main() -> None:
             "A 10-step measure at 512 was about 2.26 s/step and 5.52 GB. "
             "On that same run, 768 was about 4.40 s/step and 6.12 GB, "
             "versus 4.25 s/step and 7.01 GB at 768 on the earlier baseline."
+        ),
+    )
+    parser.add_argument(
+        "--quantize-base",
+        action="store_true",
+        help=(
+            "Quantize frozen linear weights. Off unless passed. Convolutions stay fp16. "
+            "A 10-step measure was slower, about 4.67 s/step, and lighter, about 4.15 GB peak, "
+            "versus 4.25 s/step and 7.01 GB. This is not a speedup."
         ),
     )
     parser.add_argument("--stability", action="store_true", help="train the cached 2-image set and skip image generation")
