@@ -7,6 +7,7 @@ import mlx.nn as nn
 import numpy as np
 from PIL import Image
 
+from mlx_diffusers.layers import Conv2d
 from mlx_diffusers.pipelines.pipeline_stable_diffusion_xl import StableDiffusionXLPipeline
 from mlx_diffusers.training.dataset import (
     area_buckets,
@@ -16,6 +17,7 @@ from mlx_diffusers.training.dataset import (
     stage_step_counts,
 )
 from mlx_diffusers.training.lora import inject, load_kohya, lora_arrays, save_kohya
+from mlx_diffusers.training.quantize import quantize_frozen_linears
 from mlx_diffusers.training.trainer import fixed_batch_loss, train
 
 
@@ -139,6 +141,41 @@ def test_trainer_uses_pooled_and_time_ids():
     after = fixed_batch_loss(model, examples[0], alphas, step=3)
     assert np.isfinite(before) and np.isfinite(after)
     assert result["losses"]
+
+
+def test_quantize_base_hits_linears_and_leaves_convolutions():
+    mx.random.seed(0)
+
+    class Block(nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.to_q = nn.Linear(64, 64, bias=False)
+            self.conv = Conv2d(4, 4, kernel_size=1)
+            self.odd = nn.Linear(30, 16, bias=False)
+
+        def __call__(self, tokens, pixels):
+            return self.to_q(tokens), self.conv(pixels)
+
+    model = Block()
+    model.to_q.weight = model.to_q.weight.astype(mx.float16)
+    model.conv.weight = model.conv.weight.astype(mx.float16)
+    inject(model, rank=4, alpha=4, targets=("to_q",))
+    assert quantize_frozen_linears(model) >= 1
+    assert isinstance(model.to_q.linear, nn.QuantizedLinear)
+    assert model.to_q.lora_a.dtype == mx.float32
+    assert isinstance(model.odd, nn.Linear)
+    assert model.conv.weight.dtype == mx.float16
+    tokens = mx.random.normal((1, 8, 64)).astype(mx.float16)
+    pixels = mx.random.normal((1, 4, 8, 8)).astype(mx.float16)
+
+    def loss(tokens):
+        hidden, _pixels = model(tokens, pixels)
+        return mx.mean(hidden.astype(mx.float32))
+
+    grad = mx.grad(loss)(tokens)
+    mx.eval(grad)
+    assert grad.shape == tokens.shape
+    assert float(mx.max(mx.abs(grad))) > 0
 
 
 def test_resolution_choices_keep_768_as_the_default():
